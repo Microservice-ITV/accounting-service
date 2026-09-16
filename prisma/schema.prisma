@@ -1,0 +1,70 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  INCOME
+  EXPENSE
+}
+
+enum AccountStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum Direction {
+  DEBIT
+  CREDIT
+}
+
+enum EntryStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+model Account {
+  id        String        @id @default(cuid())
+  code      String        @unique
+  name      String
+  type      AccountType
+  status    AccountStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  lines EntryLine[]
+}
+
+model JournalEntry {
+  id            String      @id @default(cuid())
+  referenceType String
+  referenceId   String
+  eventId       String?     @unique
+  narration     String?
+  entryDate     DateTime    @default(now())
+  status        EntryStatus @default(POSTED)
+  createdAt     DateTime    @default(now())
+
+  lines EntryLine[]
+}
+
+model EntryLine {
+  id            String        @id @default(cuid())
+  journalEntryId String
+  accountId     String
+  account       Account       @relation(fields: [accountId], references: [id])
+  direction     Direction
+  amount        Decimal
+  memo          String?
+  createdAt     DateTime      @default(now())
+
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+}

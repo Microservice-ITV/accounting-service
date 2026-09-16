@@ -1,0 +1,79 @@
+version: "3.9"
+
+services:
+  accounting-app:
+    container_name: accounting-service
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+    working_dir: /var/www/html/accounting-service
+    restart: unless-stopped
+    ports:
+      - "4005:4005"
+    env_file:
+      - ./.env
+    environment:
+      PORT: 4005
+      RUN_MIGRATIONS: "true"
+      RUN_SEED: "true"
+      DATABASE_URL: postgresql://postgres:postgres@accounting-db:5432/accounting_service?schema=public
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-order_events}
+      RABBITMQ_PAYMENT_COMPLETED_KEY: ${RABBITMQ_PAYMENT_COMPLETED_KEY:-payment.completed}
+      RABBITMQ_PAYMENT_QUEUE: ${RABBITMQ_PAYMENT_QUEUE:-accounting.payment_completed}
+      RABBITMQ_PAYMENT_DLQ: ${RABBITMQ_PAYMENT_DLQ:-accounting.payment_completed.dlq}
+    depends_on:
+      accounting-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: npm run dev
+    networks:
+      - accounting-network
+
+  accounting-db:
+    image: postgres:16
+    container_name: accounting-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: accounting_service
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - accounting_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d accounting_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - accounting-network
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: accounting-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - accounting-network
+
+volumes:
+  accounting_pg_data:
+
+networks:
+  accounting-network:
+    driver: bridge
