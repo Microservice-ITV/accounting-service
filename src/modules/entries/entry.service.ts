@@ -17,6 +17,15 @@ export type CreateJournalEntryInput = {
   lines: EntryLineInput[];
 };
 
+export type CreateExpenseInput = {
+  referenceId: string;
+  amount: number;
+  expenseAccountCode?: string;
+  fundingAccountCode?: string;
+  eventId?: string;
+  description?: string;
+};
+
 function isValidDirection(direction: string): direction is Direction {
   return direction === 'DEBIT' || direction === 'CREDIT';
 }
@@ -97,6 +106,56 @@ export async function createJournalEntry(input: CreateJournalEntryInput) {
       status: journalEntry.status,
       lines: input.lines,
     };
+  });
+}
+
+export async function createExpense(input: CreateExpenseInput) {
+  const expenseAccountCode = input.expenseAccountCode || '5000';
+  const fundingAccountCode = input.fundingAccountCode || '1000';
+
+  if (expenseAccountCode === fundingAccountCode) {
+    throw new Error('Expense and funding accounts must be different');
+  }
+
+  const accounts = await prisma.account.findMany({
+    where: { code: { in: [expenseAccountCode, fundingAccountCode] } },
+  });
+  const accountMap = new Map(accounts.map((account) => [account.code, account]));
+  const expenseAccount = accountMap.get(expenseAccountCode);
+  const fundingAccount = accountMap.get(fundingAccountCode);
+
+  if (!expenseAccount || !fundingAccount) {
+    const missingCodes = [expenseAccountCode, fundingAccountCode].filter((code) => !accountMap.has(code));
+    throw new Error(`Unknown account codes: ${missingCodes.join(', ')}`);
+  }
+
+  if (expenseAccount.type !== 'EXPENSE') {
+    throw new Error(`Account ${expenseAccountCode} must be an EXPENSE account`);
+  }
+
+  if (fundingAccount.type === 'INCOME' || fundingAccount.type === 'EXPENSE') {
+    throw new Error(`Account ${fundingAccountCode} cannot fund an expense`);
+  }
+
+  return createJournalEntry({
+    referenceType: 'EXPENSE',
+    referenceId: input.referenceId,
+    eventId: input.eventId,
+    narration: input.description || 'Expense recorded',
+    lines: [
+      {
+        accountCode: expenseAccountCode,
+        direction: 'DEBIT',
+        amount: input.amount,
+        memo: input.description,
+      },
+      {
+        accountCode: fundingAccountCode,
+        direction: 'CREDIT',
+        amount: input.amount,
+        memo: 'Expense paid',
+      },
+    ],
   });
 }
 

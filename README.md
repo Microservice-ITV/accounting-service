@@ -50,6 +50,18 @@ Invoke-RestMethod http://localhost:4005/api/v1/entries/reference/PAYMENT/<paymen
 
 The RabbitMQ consumer acknowledges a message only after the journal transaction commits. Failed database operations are requeued; malformed or invalid events are dead-lettered.
 
+## Record an expense
+
+Create a balanced expense entry. The default accounts are Operating Expenses (`5000`) and Cash (`1000`):
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:4005/api/v1/expenses `
+	-ContentType 'application/json' `
+	-Body '{"referenceId":"office-supplies-2026-09","amount":125.50,"description":"Office supplies"}'
+```
+
+Use `expenseAccountCode` and `fundingAccountCode` to select other seeded accounts. The expense account must have type `EXPENSE`, and the funding account cannot be an income or expense account.
+
 ## Main responsibilities
 - Record journal entries
 - Validate debit/credit balance
