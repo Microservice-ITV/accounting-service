@@ -11,6 +11,15 @@ const defaultAccounts: Array<{ code: string; name: string; type: AccountType }> 
   { code: '5000', name: 'Operating Expenses', type: 'EXPENSE' },
 ];
 
+const defaultExpenseCategories = [
+  { code: 'OFFICE_SUPPLIES', name: 'Office Supplies', description: 'Office, stationery, and small supplies' },
+  { code: 'MARKETING', name: 'Marketing', description: 'Advertising and promotional costs' },
+  { code: 'UTILITIES', name: 'Utilities', description: 'Internet, electricity, and water bills' },
+  { code: 'TRAVEL', name: 'Travel', description: 'Travel and transportation expenses' },
+  { code: 'SOFTWARE', name: 'Software', description: 'Software subscriptions and tools' },
+  { code: 'OTHER', name: 'Other', description: 'Other operational expenses' },
+];
+
 const sampleEntries = [
   {
     eventId: 'seed-opening-capital-2026',
@@ -65,6 +74,21 @@ async function seedAccounts() {
     });
 
     accountsByCode.set(seededAccount.code, seededAccount.id);
+  }
+
+  for (const category of defaultExpenseCategories) {
+    await prisma.expenseCategory.upsert({
+      where: { code: category.code },
+      update: {
+        name: category.name,
+        description: category.description,
+      },
+      create: {
+        code: category.code,
+        name: category.name,
+        description: category.description,
+      },
+    });
   }
 
   for (const entry of sampleEntries) {

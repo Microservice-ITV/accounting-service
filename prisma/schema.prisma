@@ -32,15 +32,29 @@ enum EntryStatus {
 }
 
 model Account {
-  id        String        @id @default(cuid())
-  code      String        @unique
-  name      String
-  type      AccountType
-  status    AccountStatus @default(ACTIVE)
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  id          String        @id @default(cuid())
+  code        String        @unique
+  name        String
+  type        AccountType
+  status      AccountStatus @default(ACTIVE)
+  description String?
+  parentId    String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
-  lines EntryLine[]
+  parent   Account?  @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children Account[] @relation("AccountHierarchy")
+  lines    EntryLine[]
+}
+
+model ExpenseCategory {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String   @unique
+  description String?
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model JournalEntry {
