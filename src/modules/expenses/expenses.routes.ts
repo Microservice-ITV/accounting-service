@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { requireExpenseAuth } from '../../middleware/auth.js';
 import {
   createExpense,
   createExpenseCategory,
@@ -13,6 +14,7 @@ import {
 const router = Router();
 
 const expenseSchema = z.object({
+  shopId: z.string().trim().min(1),
   amount: z.coerce.number().finite().positive(),
   expenseDate: z.string().trim().min(1).optional(),
   expenseAccountCode: z.string().trim().min(1).optional(),
@@ -70,31 +72,36 @@ router.delete('/expenses/categories/:id', async (req, res) => {
   }
 });
 
-router.get('/expenses', async (_req, res) => {
+router.get('/expenses', requireExpenseAuth, async (req, res) => {
   try {
-    return res.json(await listExpenses());
+    const auth = (req as typeof req & { auth?: any }).auth ?? null;
+    return res.json(await listExpenses(auth));
   } catch (error) {
-    return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to fetch expenses' });
+    const message = error instanceof Error ? error.message : 'Failed to fetch expenses';
+    return res.status(/Unauthorized|Unauthenticated/i.test(message) ? 403 : 500).json({ error: message });
   }
 });
 
-router.get('/expenses/reference/:referenceId', async (req, res) => {
+router.get('/expenses/reference/:referenceId', requireExpenseAuth, async (req, res) => {
   try {
-    const expense = await getExpenseByReference(req.params.referenceId);
+    const auth = (req as typeof req & { auth?: any }).auth ?? null;
+    const referenceId = Array.isArray(req.params.referenceId) ? req.params.referenceId[0] : req.params.referenceId;
+    const expense = await getExpenseByReference(referenceId, auth);
     if (!expense) {
       return res.status(404).json({ error: 'Expense not found' });
     }
 
     return res.json(expense);
   } catch (error) {
-    return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to fetch expense' });
+    const message = error instanceof Error ? error.message : 'Failed to fetch expense';
+    return res.status(/Unauthorized|Unauthenticated/i.test(message) ? 403 : 500).json({ error: message });
   }
 });
 
-router.post('/expenses', async (req, res) => {
+router.post('/expenses', requireExpenseAuth, async (req, res) => {
   try {
     const expense = expenseSchema.parse(req.body);
-    const entry = await createExpense(expense);
+    const entry = await createExpense(expense, (req as typeof req & { auth?: any }).auth ?? null);
     return res.status(201).json(entry);
   } catch (error) {
     const message = error instanceof z.ZodError
@@ -102,7 +109,8 @@ router.post('/expenses', async (req, res) => {
       : error instanceof Error
         ? error.message
         : 'Failed to create expense';
-    return res.status(400).json({ error: message });
+    const status = /not authorized|Unauthenticated|Unauthorized|must belong|cannot be resolved|must be an|not found|invalid/i.test(message) ? 403 : 400;
+    return res.status(status).json({ error: message });
   }
 });
 

@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma.js';
 
 export type Direction = 'DEBIT' | 'CREDIT';
@@ -48,12 +49,17 @@ function validateLines(lines: EntryLineInput[]) {
   }
 }
 
-export async function createJournalEntry(input: CreateJournalEntryInput) {
+type EntryDbClient = typeof prisma | Prisma.TransactionClient;
+
+export async function createJournalEntryInTransaction(
+  input: CreateJournalEntryInput,
+  db: EntryDbClient,
+) {
   validateLines(input.lines);
 
   const accountCodes = [...new Set(input.lines.map((line) => line.accountCode))];
 
-  const accounts = await prisma.account.findMany({
+  const accounts = await db.account.findMany({
     where: { code: { in: accountCodes } },
   });
 
@@ -64,42 +70,44 @@ export async function createJournalEntry(input: CreateJournalEntryInput) {
     throw new Error(`Unknown account codes: ${missingCodes.join(', ')}`);
   }
 
-  return prisma.$transaction(async (tx) => {
-    const journalEntry = await tx.journalEntry.create({
-      data: {
-        referenceType: input.referenceType,
-        referenceId: input.referenceId,
-        eventId: input.eventId,
-        narration: input.narration || 'Accounting entry',
-        entryDate: input.entryDate ? new Date(input.entryDate) : new Date(),
-        status: 'POSTED',
-      },
-    });
-
-    await Promise.all(
-      input.lines.map((line: EntryLineInput) =>
-        tx.entryLine.create({
-          data: {
-            journalEntryId: journalEntry.id,
-            accountId: accountMap.get(line.accountCode)!.id,
-            direction: line.direction,
-            amount: line.amount,
-            memo: line.memo || null,
-          },
-        }),
-      ),
-    );
-
-    return {
-      id: journalEntry.id,
-      referenceType: journalEntry.referenceType,
-      referenceId: journalEntry.referenceId,
-      eventId: journalEntry.eventId,
-      narration: journalEntry.narration,
-      status: journalEntry.status,
-      lines: input.lines,
-    };
+  const journalEntry = await db.journalEntry.create({
+    data: {
+      referenceType: input.referenceType,
+      referenceId: input.referenceId,
+      eventId: input.eventId,
+      narration: input.narration || 'Accounting entry',
+      entryDate: input.entryDate ? new Date(input.entryDate) : new Date(),
+      status: 'POSTED',
+    },
   });
+
+  await Promise.all(
+    input.lines.map((line: EntryLineInput) =>
+      db.entryLine.create({
+        data: {
+          journalEntryId: journalEntry.id,
+          accountId: accountMap.get(line.accountCode)!.id,
+          direction: line.direction,
+          amount: line.amount,
+          memo: line.memo || null,
+        },
+      }),
+    ),
+  );
+
+  return {
+    id: journalEntry.id,
+    referenceType: journalEntry.referenceType,
+    referenceId: journalEntry.referenceId,
+    eventId: journalEntry.eventId,
+    narration: journalEntry.narration,
+    status: journalEntry.status,
+    lines: input.lines,
+  };
+}
+
+export async function createJournalEntry(input: CreateJournalEntryInput) {
+  return prisma.$transaction((tx) => createJournalEntryInTransaction(input, tx));
 }
 
 export async function listEntries() {

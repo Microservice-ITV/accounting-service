@@ -10,9 +10,25 @@ startPaymentConsumer().catch((error) => {
   console.error('Failed to start accounting RabbitMQ consumer', error);
 });
 
+let isShuttingDown = false;
+
 const shutdown = async () => {
-  await closePaymentConsumer();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (isShuttingDown) {
+    return;
+  }
+
+  isShuttingDown = true;
+  const shutdownTimeout = setTimeout(() => {
+    server.closeAllConnections();
+    process.exit(1);
+  }, 5000);
+
+  await Promise.allSettled([
+    closePaymentConsumer(),
+    new Promise<void>((resolve) => server.close(() => resolve())),
+  ]);
+
+  clearTimeout(shutdownTimeout);
 };
 
 process.once('SIGINT', () => void shutdown());

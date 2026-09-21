@@ -10,10 +10,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json package-lock.json ./
+COPY package*.json ./
 COPY prisma ./prisma
 
-RUN npm install
+RUN npm ci --include=dev
 
 RUN npx prisma generate
 
@@ -26,4 +26,4 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 EXPOSE 4005
 
-CMD ["npm", "run", "dev"]
+CMD ["sh", "-c", "npm run build && npm run start"]

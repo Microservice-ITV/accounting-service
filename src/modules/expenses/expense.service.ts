@@ -1,5 +1,12 @@
 import prisma from '../../lib/prisma.js';
-import { createJournalEntry } from '../entries/entry.service.js';
+import { createJournalEntryInTransaction } from '../entries/entry.service.js';
+
+export type ExpenseAuthContext = {
+  userId: string;
+  activeShopId?: string | null;
+  authorizedShopIds?: Iterable<string>;
+  shops?: Array<{ shop_id?: string | null }>;
+};
 
 export type CreateExpenseInput = {
   amount: number;
@@ -10,6 +17,7 @@ export type CreateExpenseInput = {
   expenseCategoryId?: string;
   category?: string;
   description?: string;
+  shopId?: string | null;
 };
 
 function formatDateKey(date: Date) {
@@ -63,12 +71,39 @@ export async function deleteExpenseCategory(id: string) {
   return prisma.expenseCategory.delete({ where: { id } });
 }
 
-export async function createExpense(input: CreateExpenseInput) {
+export async function createExpense(input: CreateExpenseInput, authContext?: ExpenseAuthContext | null) {
+  if (!authContext) {
+    throw new Error('Unauthenticated');
+  }
+
+  if (!authContext.userId) {
+    throw new Error('Authenticated user is required');
+  }
+
+  const shopId = input.shopId?.trim();
+  if (!shopId) {
+    throw new Error('Shop is required for the expense');
+  }
+
+  const authorizedShopIds = new Set(Array.from(authContext.authorizedShopIds ?? []).map((id) => id.trim()).filter(Boolean));
+  if (authorizedShopIds.size > 0 && !authorizedShopIds.has(shopId)) {
+    throw new Error('User is not authorized for the selected shop');
+  }
+
+  const activeShopId = authContext.activeShopId?.trim() || Array.from(authorizedShopIds)[0];
+  if (!activeShopId) {
+    throw new Error('Seller is not assigned to any authorized shop');
+  }
+
   const expenseAccountCode = input.expenseAccountCode || '5000';
   const fundingAccountCode = input.fundingAccountCode || '1000';
   const description = input.description?.trim();
   const categoryId = input.expenseCategoryId?.trim() || input.category?.trim();
   const expenseDate = input.expenseDate ? new Date(input.expenseDate) : new Date();
+
+  if (!Number.isFinite(input.amount) || input.amount <= 0) {
+    throw new Error('Expense amount must be greater than 0');
+  }
 
   if (!categoryId) {
     throw new Error('Expense category is required');
@@ -131,38 +166,66 @@ export async function createExpense(input: CreateExpenseInput) {
   const referenceId = buildExpenseReferenceId(expenseDate, nextSequence);
   const narrationText = [expenseCategory.name, description].filter(Boolean).join(' - ') || 'Expense recorded';
 
-  return createJournalEntry({
-    referenceType: 'EXPENSE',
-    referenceId,
-    eventId: input.eventId,
-    narration: narrationText,
-    entryDate: expenseDate,
-    lines: [
-      {
-        accountCode: expenseAccountCode,
-        direction: 'DEBIT',
+  return prisma.$transaction(async (tx) => {
+    const expense = await tx.expense.create({
+      data: {
+        expenseNo: referenceId,
+        shopId,
+        sellerUserId: authContext.userId,
+        expenseTypeId: expenseCategory.id,
         amount: input.amount,
-        memo: expenseCategory.name,
+        currency: 'MMK',
+        description: description ?? null,
+        expenseDate,
+        status: 'DRAFT',
       },
-      {
-        accountCode: fundingAccountCode,
-        direction: 'CREDIT',
-        amount: input.amount,
-        memo: `${expenseCategory.name} paid`,
-      },
-    ],
+    });
+
+    const createdEntry = await createJournalEntryInTransaction({
+      referenceType: 'EXPENSE',
+      referenceId,
+      eventId: input.eventId,
+      narration: narrationText,
+      entryDate: expenseDate,
+      lines: [
+        {
+          accountCode: expenseAccountCode,
+          direction: 'DEBIT',
+          amount: input.amount,
+          memo: expenseCategory.name,
+        },
+        {
+          accountCode: fundingAccountCode,
+          direction: 'CREDIT',
+          amount: input.amount,
+          memo: `${expenseCategory.name} paid`,
+        },
+      ],
+    }, tx);
+
+    return {
+      expense,
+      journalEntry: createdEntry,
+    };
   });
 }
 
-export async function listExpenses() {
-  return prisma.journalEntry.findMany({
-    where: { referenceType: 'EXPENSE' },
-    include: {
-      lines: {
-        include: {
-          account: true,
-        },
-      },
+export async function listExpenses(authContext?: ExpenseAuthContext | null) {
+  if (!authContext || !authContext.authorizedShopIds) {
+    throw new Error('Unauthorized');
+  }
+
+  const authorizedShopIds = Array.from(authContext.authorizedShopIds)
+    .map((shopId) => shopId.trim())
+    .filter(Boolean);
+
+  if (authorizedShopIds.length === 0) {
+    throw new Error('Unauthorized');
+  }
+
+  return prisma.expense.findMany({
+    where: {
+      shopId: { in: authorizedShopIds },
     },
     orderBy: {
       createdAt: 'desc',
@@ -170,15 +233,10 @@ export async function listExpenses() {
   });
 }
 
-export async function getExpenseByReference(referenceId: string) {
-  return prisma.journalEntry.findFirst({
-    where: { referenceType: 'EXPENSE', referenceId },
-    include: {
-      lines: {
-        include: {
-          account: true,
-        },
-      },
-    },
-  });
+export async function getExpenseByReference(referenceId: string, authContext?: ExpenseAuthContext | null) {
+  if (!authContext || !authContext.authorizedShopIds || Array.from(authContext.authorizedShopIds).filter(Boolean).length === 0) {
+    throw new Error('Unauthorized');
+  }
+
+  return null;
 }

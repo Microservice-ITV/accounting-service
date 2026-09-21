@@ -3,6 +3,7 @@ import cors from 'cors';
 import entriesRoutes from './modules/entries/entries.routes.js';
 import accountsRoutes from './modules/accounts/accounts.routes.js';
 import expensesRoutes from './modules/expenses/expenses.routes.js';
+import expenseApprovalRoutes from './modules/expenses/expense-approval.routes.js';
 import reportsRoutes from './modules/reports/reports.routes.js';
 
 const app = express();
@@ -21,6 +22,7 @@ app.get('/', (_req, res) => {
 app.use('/api/v1', entriesRoutes);
 app.use('/api/v1', accountsRoutes);
 app.use('/api/v1', expensesRoutes);
+app.use('/api/v1', expenseApprovalRoutes);
 app.use('/api/v1', reportsRoutes);
 
 export default app;

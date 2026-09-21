@@ -22,10 +22,12 @@ if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then
     npx prisma migrate deploy --schema=./prisma/schema.prisma
 fi
 
-if [ "${RUN_SEED:-false}" = "true" ]; then
+if [ "${RUN_SEED:-false}" = "true" ] && [ "${ACCOUNTING_ENABLE_SEED:-false}" = "true" ]; then
     echo "🌱 Running Prisma seed..."
     DATABASE_URL="$DATABASE_URL" \
     npm run prisma:seed
+elif [ "${RUN_SEED:-false}" = "true" ]; then
+    echo "🚫 Skipping Prisma seed because ACCOUNTING_ENABLE_SEED is not true."
 fi
 
 echo "✅ Starting application..."

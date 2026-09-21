@@ -15,20 +15,45 @@ enum AccountType {
   EXPENSE
 }
 
-enum AccountStatus {
-  ACTIVE
-  INACTIVE
-}
-
 enum Direction {
   DEBIT
   CREDIT
 }
 
-enum EntryStatus {
-  DRAFT
-  POSTED
-  REVERSED
+enum ApprovalApproverType {
+  DIRECT_MANAGER
+  MANAGER_CHAIN
+  ROLE
+  POSITION
+  SPECIFIC_USER
+}
+
+enum ApprovalActionType {
+  SUBMITTED
+  APPROVED
+  REJECTED
+  RETURNED
+  CANCELLED
+}
+
+model AccountingStatus {
+  id          String   @id @default(cuid())
+  domain      String
+  code        String
+  label       String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  accounts       Account[]          @relation("AccountStatus")
+  categories     ExpenseCategory[]  @relation("ExpenseCategoryStatus")
+  expenses       Expense[]          @relation("ExpenseStatus")
+  approvals      ExpenseApproval[]  @relation("ExpenseApprovalStatus")
+  settlements    PaymentSettlement[] @relation("SettlementStatus")
+  journalEntries JournalEntry[]     @relation("JournalEntryStatus")
+
+  @@unique([domain, code])
+  @@index([domain, isActive])
 }
 
 model Account {
@@ -36,7 +61,8 @@ model Account {
   code        String        @unique
   name        String
   type        AccountType
-  status      AccountStatus @default(ACTIVE)
+  status      String   @default("ACTIVE")
+  statusDomain String  @default("ACCOUNT")
   description String?
   parentId    String?
   createdAt   DateTime      @default(now())
@@ -45,6 +71,9 @@ model Account {
   parent   Account?  @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
   children Account[] @relation("AccountHierarchy")
   lines    EntryLine[]
+  statusDefinition AccountingStatus @relation("AccountStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
+
+  @@index([statusDomain, status])
 }
 
 model ExpenseCategory {
@@ -53,8 +82,169 @@ model ExpenseCategory {
   name        String   @unique
   description String?
   status      String   @default("ACTIVE")
+  statusDomain String  @default("EXPENSE_CATEGORY")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  expenses       Expense[]
+  approvalPolicies ApprovalPolicy[]
+  statusDefinition AccountingStatus @relation("ExpenseCategoryStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
+
+  @@index([statusDomain, status])
+}
+
+model Expense {
+  id            String        @id @default(cuid())
+  expenseNo     String        @unique
+  shopId        String?
+  sellerUserId  String?
+  expenseTypeId String
+  amount        Decimal
+  currency      String        @default("MMK")
+  description   String?
+  expenseDate   DateTime      @default(now())
+  status        String   @default("DRAFT")
+  statusDomain  String   @default("EXPENSE")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  submittedAt   DateTime?
+
+  expenseType ExpenseCategory    @relation(fields: [expenseTypeId], references: [id], onDelete: Restrict)
+  approvals   ExpenseApproval[]
+  statusDefinition AccountingStatus @relation("ExpenseStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
+
+  @@index([shopId, status])
+  @@index([sellerUserId, status])
+  @@index([status, expenseDate])
+  @@index([statusDomain, status])
+}
+
+model ApprovalPolicy {
+  id            String   @id @default(cuid())
+  name          String
+  expenseTypeId String?
+  minAmount     Decimal  @default(0)
+  maxAmount     Decimal?
+  isActive      Boolean  @default(true)
+  priority      Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  expenseType ExpenseCategory?       @relation(fields: [expenseTypeId], references: [id], onDelete: SetNull)
+  steps       ApprovalPolicyStep[]
+  conditions  ApprovalPolicyCondition[]
+
+  @@index([expenseTypeId, isActive])
+}
+
+model ApprovalPolicyStep {
+  id                  String              @id @default(cuid())
+  approvalPolicyId    String
+  stepNo              Int
+  approverType        ApprovalApproverType
+  approverReference   String
+  isRequired          Boolean             @default(true)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  approvalPolicy      ApprovalPolicy      @relation(fields: [approvalPolicyId], references: [id], onDelete: Cascade)
+
+  @@unique([approvalPolicyId, stepNo])
+  @@index([approvalPolicyId, stepNo])
+}
+
+model ApprovalPolicyCondition {
+  id               String   @id @default(cuid())
+  approvalPolicyId String
+  field            String
+  operator         String
+  value            String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  approvalPolicy   ApprovalPolicy @relation(fields: [approvalPolicyId], references: [id], onDelete: Cascade)
+
+  @@index([approvalPolicyId, field])
+}
+
+model ExpenseApproval {
+  id             String         @id @default(cuid())
+  expenseId      String
+  stepNo         Int
+  approverUserId String?
+  status         String   @default("WAITING")
+  statusDomain   String   @default("APPROVAL")
+  action         ApprovalActionType?
+  comment        String?
+  approvedAt     DateTime?
+  rejectedAt     DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  expense        Expense                @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  actions        ExpenseApprovalAction[]
+  statusDefinition AccountingStatus @relation("ExpenseApprovalStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
+
+  @@unique([expenseId, stepNo])
+  @@index([expenseId, status, stepNo])
+  @@index([approverUserId, status])
+  @@index([statusDomain, status])
+}
+
+model ExpenseApprovalAction {
+  id               String            @id @default(cuid())
+  expenseApprovalId String
+  userId           String
+  action           ApprovalActionType
+  comment          String?
+  createdAt        DateTime          @default(now())
+
+  expenseApproval  ExpenseApproval   @relation(fields: [expenseApprovalId], references: [id], onDelete: Cascade)
+
+  @@index([expenseApprovalId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model PaymentSettlement {
+  id                  String                 @id @default(cuid())
+  paymentReference    String                 @unique
+  orderId             String?
+  checkoutId          String?
+  eventId             String?                @unique
+  journalEntryId      String?
+  currency            String                 @default("USD")
+  totalAmount         Decimal
+  sellerPayableAmount Decimal                @default(0)
+  status              String                 @default("POSTED")
+  statusDomain        String                 @default("SETTLEMENT")
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  journalEntry        JournalEntry?          @relation(fields: [journalEntryId], references: [id], onDelete: SetNull)
+  lines               PaymentSettlementLine[]
+  statusDefinition    AccountingStatus       @relation("SettlementStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([checkoutId])
+  @@index([journalEntryId])
+  @@index([statusDomain, status])
+}
+
+model PaymentSettlementLine {
+  id               String            @id @default(cuid())
+  settlementId     String
+  shopId           String?
+  sellerId         String?
+  grossAmount      Decimal
+  payableAmount    Decimal           @default(0)
+  currency         String            @default("USD")
+  createdAt        DateTime          @default(now())
+
+  settlement       PaymentSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+
+  @@index([settlementId, shopId])
+  @@index([shopId])
+  @@index([sellerId])
 }
 
 model JournalEntry {
@@ -64,10 +254,15 @@ model JournalEntry {
   eventId       String?     @unique
   narration     String?
   entryDate     DateTime    @default(now())
-  status        EntryStatus @default(POSTED)
+  status        String   @default("POSTED")
+  statusDomain  String   @default("ENTRY")
   createdAt     DateTime    @default(now())
 
-  lines EntryLine[]
+  lines        EntryLine[]
+  settlements  PaymentSettlement[]
+  statusDefinition AccountingStatus @relation("JournalEntryStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
+
+  @@index([statusDomain, status])
 }
 
 model EntryLine {
