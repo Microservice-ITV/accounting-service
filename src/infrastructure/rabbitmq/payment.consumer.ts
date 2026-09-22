@@ -234,6 +234,42 @@ const processPaymentCompleted = async (message: ConsumeMessage): Promise<void> =
   console.log(`payment.completed accounted: ${event.data.payment_id}`);
 };
 
+const ensureSharedExchange = async (activeChannel: Channel): Promise<void> => {
+  try {
+    await activeChannel.checkExchange(config.rabbitmqExchange);
+    console.log(`Using existing shared exchange ${config.rabbitmqExchange} on the configured broker; no redeclaration attempted.`);
+    return;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isMissing = /404|NOT_FOUND|not found/i.test(message);
+
+    if (!isMissing) {
+      throw error;
+    }
+
+    await activeChannel.assertExchange(config.rabbitmqExchange, 'topic', { durable: true });
+    console.log(`Created missing shared exchange ${config.rabbitmqExchange}.`);
+  }
+};
+
+const ensureQueue = async (activeChannel: Channel, queueName: string, options: object): Promise<void> => {
+  try {
+    await activeChannel.checkQueue(queueName);
+    console.log(`Using existing queue ${queueName} on the configured broker; no redeclaration attempted.`);
+    return;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isMissing = /404|NOT_FOUND|not found/i.test(message);
+
+    if (!isMissing) {
+      throw error;
+    }
+
+    await activeChannel.assertQueue(queueName, options);
+    console.log(`Created missing queue ${queueName}.`);
+  }
+};
+
 const consumeMessages = async (activeChannel: Channel): Promise<void> => {
   await activeChannel.prefetch(10);
   await activeChannel.consume(config.rabbitmqPaymentQueue, async (message) => {
@@ -269,9 +305,9 @@ const connectConsumer = async (): Promise<void> => {
     nextConnection = await connect(config.rabbitmqUrl);
     nextChannel = await nextConnection.createChannel();
 
-    await nextChannel.assertExchange(config.rabbitmqExchange, 'topic', { durable: true });
-    await nextChannel.assertQueue(config.rabbitmqPaymentDlq, { durable: true });
-    await nextChannel.assertQueue(config.rabbitmqPaymentQueue, {
+    await ensureSharedExchange(nextChannel);
+    await ensureQueue(nextChannel, config.rabbitmqPaymentDlq, { durable: true });
+    await ensureQueue(nextChannel, config.rabbitmqPaymentQueue, {
       durable: true,
       deadLetterExchange: '',
       deadLetterRoutingKey: config.rabbitmqPaymentDlq,

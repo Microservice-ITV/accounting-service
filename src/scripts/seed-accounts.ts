@@ -23,6 +23,15 @@ const defaultExpenseCategories = [
   { code: 'OTHER', name: 'Other', description: 'Other operational expenses' },
 ];
 
+export function shouldSeedRequiredMasterData() {
+  const envValue = process.env.ACCOUNTING_ENABLE_SEED;
+  if (envValue !== undefined) {
+    return envValue === 'true';
+  }
+
+  return process.env.NODE_ENV !== 'production';
+}
+
 async function ensureAccount(account: { code: string; name: string; type: AccountType }) {
   return prisma.account.upsert({
     where: { code: account.code },
@@ -58,8 +67,8 @@ async function ensureExpenseCategory(category: {
 }
 
 async function seedRequiredMasterData() {
-  if (process.env.ACCOUNTING_ENABLE_SEED !== 'true') {
-    console.log('ACCOUNTING_ENABLE_SEED is not true; skipping accounting seed.');
+  if (!shouldSeedRequiredMasterData()) {
+    console.log('Accounting seed is disabled; skipping required master-data setup.');
     return;
   }
 
