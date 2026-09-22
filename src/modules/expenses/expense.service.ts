@@ -5,7 +5,10 @@ export type ExpenseAuthContext = {
   userId: string;
   activeShopId?: string | null;
   authorizedShopIds?: Iterable<string>;
-  shops?: Array<{ shop_id?: string | null }>;
+  shops?: Array<{
+    shop_id?: string | null;
+    role?: { code?: string | null; name?: string | null } | null;
+  }>;
 };
 
 export type CreateExpenseInput = {
@@ -234,9 +237,37 @@ export async function listExpenses(authContext?: ExpenseAuthContext | null) {
 }
 
 export async function getExpenseByReference(referenceId: string, authContext?: ExpenseAuthContext | null) {
-  if (!authContext || !authContext.authorizedShopIds || Array.from(authContext.authorizedShopIds).filter(Boolean).length === 0) {
+  const authorizedShopIds = Array.from(authContext?.authorizedShopIds ?? [])
+    .map((shopId) => shopId.trim())
+    .filter(Boolean);
+
+  if (authorizedShopIds.length === 0) {
     throw new Error('Unauthorized');
   }
 
-  return null;
+  const expense = await prisma.expense.findFirst({
+    where: {
+      expenseNo: referenceId,
+      shopId: { in: authorizedShopIds },
+    },
+    include: {
+      expenseType: true,
+    },
+  });
+
+  if (!expense) return null;
+
+  const journalEntry = await prisma.journalEntry.findFirst({
+    where: {
+      referenceType: 'EXPENSE',
+      referenceId: expense.expenseNo,
+    },
+    include: {
+      lines: {
+        include: { account: true },
+      },
+    },
+  });
+
+  return { ...expense, journalEntry };
 }

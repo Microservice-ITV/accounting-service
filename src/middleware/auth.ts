@@ -109,7 +109,7 @@ export function requireExpenseAuth(req: Request, _res: Response, next: NextFunct
       next();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unauthorized';
-      const status = /unauthenticated|Unauthorized|Token/.test(message) ? 401 : 403;
+      const status = /unauthenticated|unauthorized|token/i.test(message) ? 401 : 403;
       const response = _res as Response & { statusCode?: number };
       response.status(status).json({ error: message });
     }

@@ -20,14 +20,6 @@ enum Direction {
   CREDIT
 }
 
-enum ApprovalApproverType {
-  DIRECT_MANAGER
-  MANAGER_CHAIN
-  ROLE
-  POSITION
-  SPECIFIC_USER
-}
-
 enum ApprovalActionType {
   SUBMITTED
   APPROVED
@@ -87,7 +79,6 @@ model ExpenseCategory {
   updatedAt   DateTime @updatedAt
 
   expenses       Expense[]
-  approvalPolicies ApprovalPolicy[]
   statusDefinition AccountingStatus @relation("ExpenseCategoryStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
 
   @@index([statusDomain, status])
@@ -122,35 +113,16 @@ model Expense {
 model ApprovalPolicy {
   id            String   @id @default(cuid())
   name          String
-  expenseTypeId String?
   minAmount     Decimal  @default(0)
   maxAmount     Decimal?
+  level         Int      @default(1)
   isActive      Boolean  @default(true)
-  priority      Int      @default(0)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  expenseType ExpenseCategory?       @relation(fields: [expenseTypeId], references: [id], onDelete: SetNull)
-  steps       ApprovalPolicyStep[]
   conditions  ApprovalPolicyCondition[]
 
-  @@index([expenseTypeId, isActive])
-}
-
-model ApprovalPolicyStep {
-  id                  String              @id @default(cuid())
-  approvalPolicyId    String
-  stepNo              Int
-  approverType        ApprovalApproverType
-  approverReference   String
-  isRequired          Boolean             @default(true)
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-
-  approvalPolicy      ApprovalPolicy      @relation(fields: [approvalPolicyId], references: [id], onDelete: Cascade)
-
-  @@unique([approvalPolicyId, stepNo])
-  @@index([approvalPolicyId, stepNo])
+  @@index([isActive, minAmount])
 }
 
 model ApprovalPolicyCondition {
