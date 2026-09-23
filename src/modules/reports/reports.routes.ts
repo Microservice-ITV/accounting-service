@@ -88,8 +88,25 @@ router.get('/reports/profit-loss', async (req, res) => {
       },
     });
 
-    const incomeLines = entries.filter((line) => line.account.type === 'INCOME' && line.direction === 'CREDIT');
-    const expenseLines = entries.filter((line) => line.account.type === 'EXPENSE' && line.direction === 'DEBIT');
+    const expenseReferences = entries
+      .filter((line) => line.journalEntry.referenceType === 'EXPENSE')
+      .map((line) => line.journalEntry.referenceId);
+    const approvedExpenseReferences = new Set(
+      (expenseReferences.length > 0
+        ? await prisma.expense.findMany({
+            where: { expenseNo: { in: expenseReferences }, status: 'APPROVED' },
+            select: { expenseNo: true },
+          })
+        : []
+      ).map((expense) => expense.expenseNo),
+    );
+    const postedEntries = entries.filter(
+      (line) => line.journalEntry.referenceType !== 'EXPENSE'
+        || approvedExpenseReferences.has(line.journalEntry.referenceId),
+    );
+
+    const incomeLines = postedEntries.filter((line) => line.account.type === 'INCOME' && line.direction === 'CREDIT');
+    const expenseLines = postedEntries.filter((line) => line.account.type === 'EXPENSE' && line.direction === 'DEBIT');
 
     const totalIncome = incomeLines.reduce((sum, line) => sum + Number(line.amount.toString()), 0);
     const totalExpense = expenseLines.reduce((sum, line) => sum + Number(line.amount.toString()), 0);
@@ -98,7 +115,7 @@ router.get('/reports/profit-loss', async (req, res) => {
       totalIncome,
       totalExpense,
       netProfit: Number((totalIncome - totalExpense).toFixed(2)),
-      entries,
+      entries: postedEntries,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to generate profit-loss report';

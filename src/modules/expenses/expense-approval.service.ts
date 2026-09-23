@@ -1,4 +1,5 @@
 import prisma from '../../lib/prisma.js';
+import { createJournalEntryInTransaction } from '../entries/entry.service.js';
 import { resolveManagerChainFromAuth } from './auth-hierarchy.client.js';
 
 export type ApprovalPolicySeed = {
@@ -293,6 +294,16 @@ export async function submitExpenseForApproval(expenseId: string, actorUserId?: 
       throw new Error(`Expense cannot be submitted from status ${transactionExpense.status}`);
     }
 
+    const hasReturnedApproval = transactionExpense.status === 'RETURNED'
+      || Boolean(await tx.expenseApproval.findFirst({
+        where: { expenseId, action: 'RETURNED' },
+        select: { id: true },
+      }));
+
+    if (hasReturnedApproval) {
+      await tx.expenseApproval.deleteMany({ where: { expenseId } });
+    }
+
     const approvalRecords: Array<{ id: string; stepNo: number; approverUserId: string | null; status: string }> = [];
 
     for (const approvalStep of approvalChain) {
@@ -355,7 +366,7 @@ export async function approveExpenseStep(expenseId: string, approvalId: string, 
 
     const approval = await tx.expenseApproval.findUnique({
       where: { id: approvalId },
-      include: { expense: true },
+      include: { expense: { include: { expenseType: true } } },
     });
 
     if (!approval || approval.expenseId !== expenseId) {
@@ -415,6 +426,43 @@ export async function approveExpenseStep(expenseId: string, approvalId: string, 
       where: { id: expenseId },
       data: { status: nextApproval ? 'PENDING_APPROVAL' : 'APPROVED' },
     });
+
+    if (!nextApproval) {
+      const existingJournal = await tx.journalEntry.findUnique({
+        where: {
+          referenceType_referenceId: {
+            referenceType: 'EXPENSE',
+            referenceId: approval.expense.expenseNo,
+          },
+        },
+        select: { id: true },
+      });
+
+      if (!existingJournal) {
+        await createJournalEntryInTransaction({
+          referenceType: 'EXPENSE',
+          referenceId: approval.expense.expenseNo,
+          narration: [approval.expense.expenseType.name, approval.expense.description]
+            .filter(Boolean)
+            .join(' - ') || 'Expense recorded',
+          entryDate: approval.expense.expenseDate,
+          lines: [
+            {
+              accountCode: approval.expense.expenseAccountCode,
+              direction: 'DEBIT',
+              amount: Number(approval.expense.amount),
+              memo: approval.expense.expenseType.name,
+            },
+            {
+              accountCode: approval.expense.fundingAccountCode,
+              direction: 'CREDIT',
+              amount: Number(approval.expense.amount),
+              memo: `${approval.expense.expenseType.name} paid`,
+            },
+          ],
+        }, tx);
+      }
+    }
 
     return {
       expenseId,

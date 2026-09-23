@@ -90,9 +90,12 @@ model Expense {
   shopId        String?
   sellerUserId  String?
   expenseTypeId String
+  expenseAccountCode String @default("5000")
+  fundingAccountCode String @default("1000")
   amount        Decimal
   currency      String        @default("MMK")
   description   String?
+  receiptImage  String?
   expenseDate   DateTime      @default(now())
   status        String   @default("DRAFT")
   statusDomain  String   @default("EXPENSE")
@@ -235,6 +238,7 @@ model JournalEntry {
   statusDefinition AccountingStatus @relation("JournalEntryStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
 
   @@index([statusDomain, status])
+  @@unique([referenceType, referenceId])
 }
 
 model EntryLine {

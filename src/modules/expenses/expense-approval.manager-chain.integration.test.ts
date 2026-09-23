@@ -94,6 +94,10 @@ test.afterEach(() => {
 test.after(async () => {
   await prisma.expenseApprovalAction.deleteMany({ where: { expenseApproval: { expenseId: { in: createdExpenseIds } } } });
   await prisma.expenseApproval.deleteMany({ where: { expenseId: { in: createdExpenseIds } } });
+  const createdExpenses = await prisma.expense.findMany({ where: { id: { in: createdExpenseIds } }, select: { expenseNo: true } });
+  const expenseReferences = createdExpenses.map((createdExpense) => createdExpense.expenseNo);
+  await prisma.entryLine.deleteMany({ where: { journalEntry: { referenceType: 'EXPENSE', referenceId: { in: expenseReferences } } } });
+  await prisma.journalEntry.deleteMany({ where: { referenceType: 'EXPENSE', referenceId: { in: expenseReferences } } });
   await prisma.approvalPolicyCondition.deleteMany({ where: { approvalPolicyId: { in: createdPolicyIds } } });
   await prisma.approvalPolicy.deleteMany({ where: { id: { in: createdPolicyIds } } });
   await prisma.expense.deleteMany({ where: { id: { in: createdExpenseIds } } });
@@ -126,6 +130,7 @@ test('multi-level MANAGER_CHAIN maps each level to its approval step and stays s
   assert.deepEqual(submission.approvals.map((approval) => approval.status), ['PENDING', 'WAITING', 'WAITING']);
 
   await approveExpenseStep(expense.id, submission.approvals[0].id, 'manager-user-1');
+  assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo } }), 0);
   assert.deepEqual((await getExpenseApprovalStatus(expense.id)).approvals.map((approval) => approval.status), [
     'APPROVED',
     'PENDING',
@@ -139,6 +144,10 @@ test('multi-level MANAGER_CHAIN maps each level to its approval step and stays s
     'manager-user-2',
     'manager-user-3',
   ]);
+  await approveExpenseStep(expense.id, submission.approvals[1].id, 'manager-user-2');
+  await approveExpenseStep(expense.id, submission.approvals[2].id, 'manager-user-3');
+  assert.equal((await getExpenseApprovalStatus(expense.id)).status, 'APPROVED');
+  assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo } }), 1);
 });
 
 test('submission fails atomically when the required manager level is missing', async () => {

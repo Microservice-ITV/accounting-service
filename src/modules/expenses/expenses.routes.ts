@@ -8,6 +8,7 @@ import {
   getExpenseByReference,
   listExpenseCategories,
   listExpenses,
+  updateReturnedExpense,
   updateExpenseCategory,
 } from './expense.service.js';
 
@@ -23,6 +24,7 @@ const expenseSchema = z.object({
   expenseCategoryId: z.string().trim().min(1).optional(),
   category: z.string().trim().min(1).optional(),
   description: z.string().trim().min(1).optional(),
+  receiptImage: z.string().optional(),
 });
 
 const expenseCategorySchema = z.object({
@@ -111,6 +113,18 @@ router.post('/expenses', requireExpenseAuth, async (req, res) => {
         : 'Failed to create expense';
     const status = /not authorized|Unauthenticated|Unauthorized|must belong|cannot be resolved|must be an|not found|invalid/i.test(message) ? 403 : 400;
     return res.status(status).json({ error: message });
+  }
+});
+
+router.patch('/expenses/:expenseId', requireExpenseAuth, async (req, res) => {
+  try {
+    const payload = expenseSchema.pick({ amount: true, expenseDate: true, expenseCategoryId: true, description: true, receiptImage: true }).parse(req.body);
+    const expenseId = Array.isArray(req.params.expenseId) ? req.params.expenseId[0] : req.params.expenseId;
+    const expense = await updateReturnedExpense(expenseId, payload, (req as typeof req & { auth?: any }).auth ?? null);
+    return res.json(expense);
+  } catch (error) {
+    const message = error instanceof z.ZodError ? error.issues[0]?.message || 'Invalid expense payload' : error instanceof Error ? error.message : 'Failed to update expense';
+    return res.status(/not found/i.test(message) ? 404 : 400).json({ error: message });
   }
 });
 

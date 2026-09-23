@@ -70,6 +70,7 @@ test('approval workflow authorizes pending and action requests by authenticated 
     installManagerAuthResponse();
 
     const expense = await createExpense(750000, 'SHOP');
+    assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo } }), 0);
     const submission = await submitExpenseForApproval(expense.id, 'seller-001', 'token');
 
     assert.equal(submission.approvals.length, 1);
@@ -85,6 +86,12 @@ test('approval workflow authorizes pending and action requests by authenticated 
     const status = await getExpenseApprovalStatus(expense.id);
     assert.equal(status.status, 'APPROVED');
     assert.deepEqual(status.approvals.map((approval) => approval.status), ['APPROVED']);
+    assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo } }), 1);
+    await assert.rejects(
+      () => approveExpenseStep(expense.id, submission.approvals[0].id, 'shop-admin'),
+      /no longer awaiting approval|must be pending/,
+    );
+    assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo } }), 1);
 
     const rejectedExpense = await createExpense(800000, 'REJECT');
     const rejectedSubmission = await submitExpenseForApproval(rejectedExpense.id, 'seller-001', 'token');
@@ -94,15 +101,21 @@ test('approval workflow authorizes pending and action requests by authenticated 
     );
     await rejectExpenseStep(rejectedExpense.id, rejectedSubmission.approvals[0].id, 'shop-admin', 'Rejected for testing');
     assert.equal((await getExpenseApprovalStatus(rejectedExpense.id)).status, 'REJECTED');
+    assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: rejectedExpense.expenseNo } }), 0);
 
     const returnedExpense = await createExpense(850000, 'RETURN');
     const returnedSubmission = await submitExpenseForApproval(returnedExpense.id, 'seller-001', 'token');
     await returnExpenseStep(returnedExpense.id, returnedSubmission.approvals[0].id, 'shop-admin', 'Returned for testing');
     assert.equal((await getExpenseApprovalStatus(returnedExpense.id)).status, 'RETURNED');
+    assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: returnedExpense.expenseNo } }), 0);
   } finally {
     globalThis.fetch = originalFetch;
     await prisma.expenseApprovalAction.deleteMany({ where: { userId: 'shop-admin' } });
     await prisma.expenseApproval.deleteMany({ where: { expenseId: { in: createdExpenseIds } } });
+    const createdExpenses = await prisma.expense.findMany({ where: { id: { in: createdExpenseIds } }, select: { expenseNo: true } });
+    const expenseReferences = createdExpenses.map((createdExpense) => createdExpense.expenseNo);
+    await prisma.entryLine.deleteMany({ where: { journalEntry: { referenceType: 'EXPENSE', referenceId: { in: expenseReferences } } } });
+    await prisma.journalEntry.deleteMany({ where: { referenceType: 'EXPENSE', referenceId: { in: expenseReferences } } });
     await prisma.approvalPolicyCondition.deleteMany({ where: { approvalPolicyId: { in: createdPolicyIds } } });
     await prisma.approvalPolicy.deleteMany({ where: { id: { in: createdPolicyIds } } });
     await prisma.expense.deleteMany({ where: { id: { in: createdExpenseIds } } });
