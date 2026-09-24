@@ -4,8 +4,12 @@ import assert from 'node:assert/strict';
 import prisma from '../../lib/prisma.js';
 import {
   advanceApprovalWorkflow,
+  approveExpenseStep,
+  buildSequentialManagerApprovals,
   getMatchingApprovalPolicy,
+  rejectExpenseStep,
   resolveManagerChain,
+  returnExpenseStep,
   submitExpenseForApproval,
   type ApprovalPolicySeed,
 } from './expense-approval.service.js';
@@ -89,6 +93,258 @@ test('Rejected step marks the expense as rejected', () => {
 
   assert.equal(result.expenseStatus, 'REJECTED');
   assert.equal(result.currentStep.status, 'REJECTED');
+});
+
+test('policy level is capped by the available manager chain instead of inventing a missing approver', () => {
+  const approvals = buildSequentialManagerApprovals(new Map([[1, 'john']]), 2);
+  assert.deepEqual(approvals, [{ stepNo: 1, approverUserId: 'john' }]);
+
+  const threeLevelSingleManager = buildSequentialManagerApprovals(new Map([[1, 'john']]), 3);
+  assert.deepEqual(threeLevelSingleManager, [{ stepNo: 1, approverUserId: 'john' }]);
+
+  const fullChain = buildSequentialManagerApprovals(new Map([
+    [1, 'john'],
+    [2, 'sarah'],
+  ]), 3);
+  assert.deepEqual(fullChain, [
+    { stepNo: 1, approverUserId: 'john' },
+    { stepNo: 2, approverUserId: 'sarah' },
+  ]);
+});
+
+test('single available manager can complete a two-level policy and create one final journal entry', async () => {
+  const office = await prisma.expenseCategory.findUnique({ where: { code: 'OFFICE' } });
+  assert.ok(office, 'the OFFICE expense category is required');
+
+  const originalFetch = globalThis.fetch;
+  const createdExpenseIds: string[] = [];
+  const createdPolicyIds: string[] = [];
+
+  try {
+    const policy = await prisma.approvalPolicy.create({
+      data: {
+        name: 'Level 2 policy with one manager',
+        minAmount: 20000,
+        maxAmount: 50000,
+        level: 2,
+        isActive: true,
+        conditions: { create: [{ field: 'shopId', operator: '=', value: 'single-manager-shop' }] },
+      },
+    });
+    createdPolicyIds.push(policy.id);
+
+    const expense = await prisma.expense.create({
+      data: {
+        expenseNo: `SINGLE-${Date.now()}`,
+        shopId: 'single-manager-shop',
+        sellerUserId: 'seller-user',
+        expenseTypeId: office.id,
+        amount: 30000,
+        description: 'Single manager approval test',
+      },
+    });
+    createdExpenseIds.push(expense.id);
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/shops/single-manager-shop/users')) {
+        return new Response(JSON.stringify({
+          data: { users: [
+            { id: 'seller-membership', shop_id: 'single-manager-shop', user: { id: 'seller-user' }, status: 'active' },
+            { id: 'level1-membership', shop_id: 'single-manager-shop', user: { id: 'john' }, status: 'active' },
+          ] },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      return new Response(JSON.stringify({
+        data: {
+          shopUserId: 'seller-membership',
+          managers: [
+            { level: 1, shopUserId: 'level1-membership', userId: 'john', name: 'John' },
+          ],
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const submission = await submitExpenseForApproval(expense.id, 'seller-user', 'token');
+    assert.deepEqual(submission.approvals.map((approval) => approval.approverUserId), ['john']);
+    assert.deepEqual(submission.approvals.map((approval) => approval.status), ['PENDING']);
+
+    const approval = await prisma.expenseApproval.findFirst({ where: { expenseId: expense.id, stepNo: 1 }, select: { id: true } });
+    assert.ok(approval, 'expected a pending approval step');
+
+    await approveExpenseStep(expense.id, approval.id, 'john');
+
+    assert.equal(await prisma.expense.count({ where: { id: expense.id, status: 'APPROVED' } }), 1);
+    assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo } }), 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await prisma.expenseApprovalAction.deleteMany({ where: { expenseApproval: { expenseId: { in: createdExpenseIds } } } });
+    await prisma.expenseApproval.deleteMany({ where: { expenseId: { in: createdExpenseIds } } });
+    await prisma.approvalPolicyCondition.deleteMany({ where: { approvalPolicyId: { in: createdPolicyIds } } });
+    await prisma.approvalPolicy.deleteMany({ where: { id: { in: createdPolicyIds } } });
+    await prisma.expense.deleteMany({ where: { id: { in: createdExpenseIds } } });
+  }
+});
+
+test('wrong approver cannot approve another manager step', async () => {
+  const office = await prisma.expenseCategory.findUnique({ where: { code: 'OFFICE' } });
+  assert.ok(office, 'the OFFICE expense category is required');
+
+  const originalFetch = globalThis.fetch;
+  const createdExpenseIds: string[] = [];
+  const createdPolicyIds: string[] = [];
+
+  try {
+    const policy = await prisma.approvalPolicy.create({
+      data: {
+        name: 'Level 2 policy wrong approver',
+        minAmount: 20000,
+        maxAmount: 50000,
+        level: 2,
+        isActive: true,
+        conditions: { create: [{ field: 'shopId', operator: '=', value: 'wrong-approver-shop' }] },
+      },
+    });
+    createdPolicyIds.push(policy.id);
+
+    const expense = await prisma.expense.create({
+      data: {
+        expenseNo: `WRONG-${Date.now()}`,
+        shopId: 'wrong-approver-shop',
+        sellerUserId: 'seller-user',
+        expenseTypeId: office.id,
+        amount: 30000,
+        description: 'Wrong approver test',
+      },
+    });
+    createdExpenseIds.push(expense.id);
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/shops/wrong-approver-shop/users')) {
+        return new Response(JSON.stringify({
+          data: { users: 
+            [
+              { id: 'seller-membership', shop_id: 'wrong-approver-shop', user: { id: 'seller-user' }, status: 'active' },
+              { id: 'level1-membership', shop_id: 'wrong-approver-shop', user: { id: 'john' }, status: 'active' },
+            ] },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      return new Response(JSON.stringify({
+        data: {
+          shopUserId: 'seller-membership',
+          managers: [
+            { level: 1, shopUserId: 'level1-membership', userId: 'john', name: 'John' },
+          ],
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    await submitExpenseForApproval(expense.id, 'seller-user', 'token');
+
+    const approval = await prisma.expenseApproval.findFirst({ where: { expenseId: expense.id }, select: { id: true } });
+    assert.ok(approval, 'expected an approval record');
+
+    await assert.rejects(() => approveExpenseStep(expense.id, approval.id, 'not-john'), /Forbidden: you are not assigned to this approval step/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await prisma.expenseApprovalAction.deleteMany({ where: { expenseApproval: { expenseId: { in: createdExpenseIds } } } });
+    await prisma.expenseApproval.deleteMany({ where: { expenseId: { in: createdExpenseIds } } });
+    await prisma.approvalPolicyCondition.deleteMany({ where: { approvalPolicyId: { in: createdPolicyIds } } });
+    await prisma.approvalPolicy.deleteMany({ where: { id: { in: createdPolicyIds } } });
+    await prisma.expense.deleteMany({ where: { id: { in: createdExpenseIds } } });
+  }
+});
+
+test('reject and return actions preserve the existing approval behavior', async () => {
+  const office = await prisma.expenseCategory.findUnique({ where: { code: 'OFFICE' } });
+  assert.ok(office, 'the OFFICE expense category is required');
+
+  const originalFetch = globalThis.fetch;
+  const createdExpenseIds: string[] = [];
+  const createdPolicyIds: string[] = [];
+
+  try {
+    const policy = await prisma.approvalPolicy.create({
+      data: {
+        name: 'Return and reject policy',
+        minAmount: 0,
+        maxAmount: 50000,
+        level: 1,
+        isActive: true,
+        conditions: { create: [{ field: 'shopId', operator: '=', value: 'reject-return-shop' }] },
+      },
+    });
+    createdPolicyIds.push(policy.id);
+
+    const rejectExpense = await prisma.expense.create({
+      data: {
+        expenseNo: `REJECT-${Date.now()}`,
+        shopId: 'reject-return-shop',
+        sellerUserId: 'seller-user',
+        expenseTypeId: office.id,
+        amount: 15000,
+        description: 'Reject test',
+      },
+    });
+    createdExpenseIds.push(rejectExpense.id);
+
+    const returnExpense = await prisma.expense.create({
+      data: {
+        expenseNo: `RETURN-${Date.now()}`,
+        shopId: 'reject-return-shop',
+        sellerUserId: 'seller-user',
+        expenseTypeId: office.id,
+        amount: 20000,
+        description: 'Return test',
+      },
+    });
+    createdExpenseIds.push(returnExpense.id);
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/shops/reject-return-shop/users')) {
+        return new Response(JSON.stringify({
+          data: { users: [
+            { id: 'seller-membership', shop_id: 'reject-return-shop', user: { id: 'seller-user' }, status: 'active' },
+            { id: 'level1-membership', shop_id: 'reject-return-shop', user: { id: 'john' }, status: 'active' },
+          ] },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      return new Response(JSON.stringify({
+        data: {
+          shopUserId: 'seller-membership',
+          managers: [
+            { level: 1, shopUserId: 'level1-membership', userId: 'john', name: 'John' },
+          ],
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const rejectSubmission = await submitExpenseForApproval(rejectExpense.id, 'seller-user', 'token');
+    const rejectApproval = await prisma.expenseApproval.findFirst({ where: { expenseId: rejectExpense.id }, select: { id: true } });
+    assert.ok(rejectApproval, 'expected a reject approval step');
+    await rejectExpenseStep(rejectExpense.id, rejectApproval.id, 'john', 'Rejected by manager');
+    assert.equal(await prisma.expense.count({ where: { id: rejectExpense.id, status: 'REJECTED' } }), 1);
+
+    const returnSubmission = await submitExpenseForApproval(returnExpense.id, 'seller-user', 'token');
+    const returnApproval = await prisma.expenseApproval.findFirst({ where: { expenseId: returnExpense.id }, select: { id: true } });
+    assert.ok(returnApproval, 'expected a return approval step');
+    await returnExpenseStep(returnExpense.id, returnApproval.id, 'john', 'Returned for correction');
+    assert.equal(await prisma.expense.count({ where: { id: returnExpense.id, status: 'RETURNED' } }), 1);
+    assert.deepEqual(rejectSubmission.approvals.map((approval) => approval.status), ['PENDING']);
+    assert.deepEqual(returnSubmission.approvals.map((approval) => approval.status), ['PENDING']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await prisma.expenseApprovalAction.deleteMany({ where: { expenseApproval: { expenseId: { in: createdExpenseIds } } } });
+    await prisma.expenseApproval.deleteMany({ where: { expenseId: { in: createdExpenseIds } } });
+    await prisma.approvalPolicyCondition.deleteMany({ where: { approvalPolicyId: { in: createdPolicyIds } } });
+    await prisma.approvalPolicy.deleteMany({ where: { id: { in: createdPolicyIds } } });
+    await prisma.expense.deleteMany({ where: { id: { in: createdExpenseIds } } });
+  }
 });
 
 test('level 1, 2, and 3 policies snapshot the correct sequential manager chain', async () => {
@@ -230,7 +486,7 @@ test('level 1, 2, and 3 policies snapshot the correct sequential manager chain',
   }
 });
 
-test('insufficient manager hierarchy fails atomically when the required level is missing', async () => {
+test('submission fails atomically when no active manager is available', async () => {
   const office = await prisma.expenseCategory.findUnique({ where: { code: 'OFFICE' } });
   assert.ok(office, 'the OFFICE expense category is required');
 
@@ -241,7 +497,7 @@ test('insufficient manager hierarchy fails atomically when the required level is
   try {
     const policy = await prisma.approvalPolicy.create({
       data: {
-        name: 'Level 3 policy missing managers',
+        name: 'Level 3 policy without manager chain',
         minAmount: 0,
         maxAmount: 200000,
         level: 3,
@@ -269,8 +525,6 @@ test('insufficient manager hierarchy fails atomically when the required level is
         return new Response(JSON.stringify({
           data: { users: [
             { id: 'seller-membership', shop_id: 'missing-hierarchy-shop', user: { id: 'seller-user' }, status: 'active' },
-            { id: 'level1-membership', shop_id: 'missing-hierarchy-shop', user: { id: 'john' }, status: 'active' },
-            { id: 'level2-membership', shop_id: 'missing-hierarchy-shop', user: { id: 'backend-lead' }, status: 'active' },
           ] },
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -278,17 +532,14 @@ test('insufficient manager hierarchy fails atomically when the required level is
       return new Response(JSON.stringify({
         data: {
           shopUserId: 'seller-membership',
-          managers: [
-            { level: 1, shopUserId: 'level1-membership', userId: 'john', name: 'John' },
-            { level: 2, shopUserId: 'level2-membership', userId: 'backend-lead', name: 'Backend Lead' },
-          ],
+          managers: [],
         },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
 
     await assert.rejects(
       () => submitExpenseForApproval(expense.id, 'seller-user', 'token'),
-      /Required manager level 3 is unavailable/,
+      /No active manager is available for approval/,
     );
     assert.equal(await prisma.expenseApproval.count({ where: { expenseId: expense.id } }), 0);
     assert.equal((await prisma.expense.findUnique({ where: { id: expense.id } }))?.status, 'DRAFT');

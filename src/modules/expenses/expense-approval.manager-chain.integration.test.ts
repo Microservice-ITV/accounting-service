@@ -150,20 +150,18 @@ test('multi-level MANAGER_CHAIN maps each level to its approval step and stays s
   assert.equal(await prisma.journalEntry.count({ where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo } }), 1);
 });
 
-test('submission fails atomically when the required manager level is missing', async () => {
+test('submission uses the available manager chain when the policy level is higher than the current manager depth', async () => {
   useShop('insufficient');
   await createPolicy(2, `Manager chain insufficient ${Date.now()}`);
   const expense = await createExpense('insufficient');
   installAuthResponses(1);
 
-  await assert.rejects(
-    () => submitExpenseForApproval(expense.id, sellerUserId, 'token'),
-    /Required manager level 2 is unavailable/,
-  );
+  const submission = await submitExpenseForApproval(expense.id, sellerUserId, 'token');
+  assert.deepEqual(submission.approvals.map((approval) => approval.approverUserId), ['manager-user-1']);
 
   const persisted = await prisma.expense.findUnique({ where: { id: expense.id } });
-  assert.equal(persisted?.status, 'DRAFT');
-  assert.equal(await prisma.expenseApproval.count({ where: { expenseId: expense.id } }), 0);
+  assert.equal(persisted?.status, 'PENDING_APPROVAL');
+  assert.equal(await prisma.expenseApproval.count({ where: { expenseId: expense.id } }), 1);
 });
 
 test('submission fails when the seller has no manager', async () => {
@@ -174,7 +172,7 @@ test('submission fails when the seller has no manager', async () => {
 
   await assert.rejects(
     () => submitExpenseForApproval(expense.id, sellerUserId, 'token'),
-    /Required manager level 1 is unavailable/,
+    /No active manager is available for approval/,
   );
 
   const persisted = await prisma.expense.findUnique({ where: { id: expense.id } });
