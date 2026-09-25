@@ -2,12 +2,14 @@ import { z } from 'zod';
 
 export type ExpenseAuthContext = {
 	userId: string;
+	role?: string;
 	activeShopId?: string | null;
 	authorizedShopIds?: Iterable<string>;
 	shops?: Array<{ shop_id?: string | null; role?: { code?: string | null; name?: string | null } | null }>;
 };
 
 export type CreateExpenseInput = {
+	scope?: 'SHOP' | 'PLATFORM';
 	amount: number;
 	expenseDate?: Date | string;
 	expenseAccountCode?: string;
@@ -27,8 +29,9 @@ export type ExpenseCategoryInput = {
 	status?: string;
 };
 
-export const expenseSchema = z.object({
-	shopId: z.string().trim().min(1),
+const expenseBaseSchema = z.object({
+	scope: z.enum(['SHOP', 'PLATFORM']).default('SHOP'),
+	shopId: z.string().trim().min(1).nullable().optional(),
 	amount: z.coerce.number().finite().positive(),
 	expenseDate: z.string().trim().min(1).optional(),
 	expenseAccountCode: z.string().trim().min(1).optional(),
@@ -40,6 +43,15 @@ export const expenseSchema = z.object({
 	receiptImage: z.string().optional(),
 });
 
+export const expenseSchema = expenseBaseSchema.superRefine((input, context) => {
+	if (input.scope === 'SHOP' && !input.shopId) {
+		context.addIssue({ code: z.ZodIssueCode.custom, path: ['shopId'], message: 'Shop is required for a shop expense' });
+	}
+	if (input.scope === 'PLATFORM' && input.shopId) {
+		context.addIssue({ code: z.ZodIssueCode.custom, path: ['shopId'], message: 'Platform expenses cannot specify a shop' });
+	}
+});
+
 export const expenseCategorySchema = z.object({
 	code: z.string().trim().min(1),
 	name: z.string().trim().min(1),
@@ -47,7 +59,7 @@ export const expenseCategorySchema = z.object({
 	status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
 });
 
-export const returnedExpenseSchema = expenseSchema.pick({
+export const returnedExpenseSchema = expenseBaseSchema.pick({
 	amount: true,
 	expenseDate: true,
 	expenseCategoryId: true,

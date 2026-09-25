@@ -22,6 +22,15 @@ export function buildExpenseReferenceId(date: Date, sequence: number) {
   return `EXP-${formatDateKey(new Date(date))}-${String(sequence).padStart(4, '0')}`;
 }
 
+const platformExpenseRoles = new Set([
+  'platform_super_admin',
+  'super_admin',
+  'platform_finance',
+  'platform_director',
+  'platform_cfo',
+  'cfo',
+]);
+
 function isExpenseReferenceCollision(error: unknown) {
   return error instanceof Prisma.PrismaClientKnownRequestError
     && error.code === 'P2002'
@@ -47,12 +56,20 @@ export class ExpenseService implements IExpenseService {
   async createExpense(input: CreateExpenseInput, authContext?: ExpenseAuthContext | null) {
     if (!authContext) throw new Error('Unauthenticated');
     if (!authContext.userId) throw new Error('Authenticated user is required');
-    const shopId = input.shopId?.trim();
-    if (!shopId) throw new Error('Shop is required for the expense');
+    const scope = input.scope ?? 'SHOP';
+    const normalizedRole = authContext.role?.trim().toLowerCase();
+    const platformRoles = new Set(['platform_super_admin', 'super_admin', 'platform_finance', 'finance_manager', 'platform_director', 'cfo']);
+    const shopId = input.shopId?.trim() ?? '';
+    if (scope === 'PLATFORM') {
+      if (shopId) throw new Error('Platform expenses cannot specify a shop');
+      if (!normalizedRole || !platformRoles.has(normalizedRole)) throw new Error('User is not authorized to create a platform expense');
+    } else if (!shopId) {
+      throw new Error('Shop is required for a shop expense');
+    }
     const authorizedShopIds = new Set(Array.from(authContext.authorizedShopIds ?? []).map((id) => id.trim()).filter(Boolean));
-    if (authorizedShopIds.size > 0 && !authorizedShopIds.has(shopId)) throw new Error('User is not authorized for the selected shop');
+    if (scope === 'SHOP' && authorizedShopIds.size > 0 && !authorizedShopIds.has(shopId)) throw new Error('User is not authorized for the selected shop');
     const activeShopId = authContext.activeShopId?.trim() || Array.from(authorizedShopIds)[0];
-    if (!activeShopId) throw new Error('Seller is not assigned to any authorized shop');
+    if (scope === 'SHOP' && !activeShopId) throw new Error('Seller is not assigned to any authorized shop');
     const expenseAccountCode = input.expenseAccountCode || '5000';
     const fundingAccountCode = input.fundingAccountCode || '1000';
     const description = input.description?.trim();
@@ -84,7 +101,7 @@ export class ExpenseService implements IExpenseService {
 
       try {
         return await this.expenseRepository.transaction(async (tx) => ({
-          expense: await this.expenseRepository.createExpense({ expenseNo: referenceId, shopId, sellerUserId: authContext.userId, expenseTypeId: expenseCategory.id, expenseAccountCode, fundingAccountCode, amount: input.amount, currency: 'MMK', description: description ?? null, receiptImage: receiptImage ?? null, expenseDate, status: 'DRAFT' }, tx),
+            expense: await this.expenseRepository.createExpense({ expenseNo: referenceId, scope, shopId: scope === 'SHOP' ? shopId : null, createdByUserId: authContext.userId, sellerUserId: authContext.userId, expenseTypeId: expenseCategory.id, expenseAccountCode, fundingAccountCode, amount: input.amount, currency: 'MMK', description: description ?? null, receiptImage: receiptImage ?? null, expenseDate, status: 'DRAFT' }, tx),
           journalEntry: null,
         }));
       } catch (error) {
@@ -114,12 +131,21 @@ export class ExpenseService implements IExpenseService {
 
   async listExpenses(authContext?: ExpenseAuthContext | null) {
     if (!authContext || !authContext.authorizedShopIds) throw new Error('Unauthorized');
+    if (platformExpenseRoles.has(authContext.role?.trim().toLowerCase() ?? '')) {
+      return this.expenseRepository.listPlatformExpenses();
+    }
     const authorizedShopIds = Array.from(authContext.authorizedShopIds).map((shopId) => shopId.trim()).filter(Boolean);
     if (authorizedShopIds.length === 0) throw new Error('Unauthorized');
     return this.expenseRepository.listExpenses(authorizedShopIds);
   }
 
   async getExpenseByReference(referenceId: string, authContext?: ExpenseAuthContext | null) {
+    if (platformExpenseRoles.has(authContext?.role?.trim().toLowerCase() ?? '')) {
+      const expense = await this.expenseRepository.findPlatformExpenseByReference(referenceId);
+      if (!expense) return null;
+      const journalEntry = await this.expenseRepository.findJournalByExpenseReference(expense.expenseNo);
+      return { ...expense, journalEntry };
+    }
     const authorizedShopIds = Array.from(authContext?.authorizedShopIds ?? []).map((shopId) => shopId.trim()).filter(Boolean);
     if (authorizedShopIds.length === 0) throw new Error('Unauthorized');
     const expense = await this.expenseRepository.findExpenseByReference(referenceId, authorizedShopIds);

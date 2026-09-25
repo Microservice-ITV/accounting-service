@@ -1,5 +1,5 @@
 import { createJournalEntryInTransaction } from '../../entries/entry.service.js';
-import { resolveManagerChainFromAuth } from '../auth-hierarchy.client.js';
+import { resolveManagerChainFromAuth, resolvePlatformManagerChainFromAuth } from '../auth-hierarchy.client.js';
 import type { IExpenseApprovalRepository } from '../interfaces/expense-approval.repository.interface.js';
 import type { IExpenseApprovalService } from '../interfaces/expense-approval.service.interface.js';
 import type {
@@ -198,14 +198,18 @@ export class ExpenseApprovalService implements IExpenseApprovalService {
     private readonly transaction: ApprovalTransaction,
   ) {}
 
-  async getExpenseApprovalStatus(expenseId: string, authorizedShopIds?: readonly string[]) {
+  async getExpenseApprovalStatus(expenseId: string, authorizedShopIds?: readonly string[], canAccessPlatform = false) {
     const expense = await this.approvalRepository.findExpenseApprovalStatus(expenseId);
 
     if (!expense) {
       throw new Error('Expense not found');
     }
 
-    if (authorizedShopIds && (!expense.shopId || !authorizedShopIds.includes(expense.shopId))) {
+    const hasShopAccess = Boolean(expense.shopId && authorizedShopIds?.includes(expense.shopId));
+    const forbidden = expense.scope === 'PLATFORM'
+      ? !canAccessPlatform
+      : authorizedShopIds !== undefined && !hasShopAccess;
+    if (forbidden) {
       throw new Error('Forbidden: you do not have access to this expense shop');
     }
 
@@ -237,25 +241,29 @@ export class ExpenseApprovalService implements IExpenseApprovalService {
 
     const activePolicies = await this.approvalRepository.findActiveApprovalPolicies();
     const matchingPolicy = activePolicies.find((policy) => {
-      const shopMatches = policy.conditions.some(
-        (condition) => condition.field === 'shopId' && condition.operator === '=' && condition.value === expense.shopId,
-      );
+      const scopeMatches = policy.scope === expense.scope;
+      const shopMatches = expense.scope === 'PLATFORM'
+        ? !expense.shopId && !policy.shopId
+        : policy.conditions.some((condition) => condition.field === 'shopId' && condition.operator === '=' && condition.value === expense.shopId);
       const amountMatches =
         Number(expense.amount) >= Number(policy.minAmount ?? 0)
         && (policy.maxAmount == null || Number(expense.amount) <= Number(policy.maxAmount));
 
-      return shopMatches && amountMatches;
+      return scopeMatches && shopMatches && amountMatches;
     });
 
     if (!matchingPolicy) {
       throw new Error('No approval policy matches this expense.');
     }
 
-    if (!expense.sellerUserId || !expense.shopId) {
-      throw new Error('Expense is missing seller or shop information');
+    const creatorUserId = expense.createdByUserId ?? expense.sellerUserId;
+    if (!creatorUserId || (expense.scope === 'SHOP' && !expense.shopId)) {
+      throw new Error('Expense is missing creator or shop information');
     }
 
-    const managerChain = await resolveManagerChainFromAuth(expense.shopId, expense.sellerUserId, bearerToken);
+    const managerChain = expense.scope === 'PLATFORM'
+      ? await resolvePlatformManagerChainFromAuth(creatorUserId, bearerToken)
+      : await resolveManagerChainFromAuth(expense.shopId as string, creatorUserId, bearerToken);
     const approvalChain = buildSequentialManagerApprovals(managerChain, matchingPolicy.level ?? 1);
 
     const submission = await this.transaction(async (tx) => {

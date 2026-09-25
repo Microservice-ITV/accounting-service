@@ -6,7 +6,7 @@ import type {
 } from '../dto/expense-approval.dto.js';
 
 export interface IExpenseApprovalService {
-  getExpenseApprovalStatus(expenseId: string, authorizedShopIds?: readonly string[]): Promise<{
+  getExpenseApprovalStatus(expenseId: string, authorizedShopIds?: readonly string[], canAccessPlatform?: boolean): Promise<{
     expenseId: string;
     status: string;
     approvals: ExpenseApprovalStatusRecord['approvals'];

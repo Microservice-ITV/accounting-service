@@ -33,7 +33,9 @@ export interface IExpenseRepository {
   findExpenseById(expenseId: string, client?: ExpenseDbClient): Promise<ExpenseRecord | null>;
   updateReturnedExpense(expenseId: string, input: Prisma.ExpenseUncheckedUpdateInput, client?: ExpenseDbClient): Promise<ExpenseWithCategory>;
   listExpenses(shopIds: string[], client?: ExpenseDbClient): Promise<ExpenseRecord[]>;
+  listPlatformExpenses(client?: ExpenseDbClient): Promise<ExpenseWithCategory[]>;
   findExpenseByReference(referenceId: string, shopIds: string[], client?: ExpenseDbClient): Promise<ExpenseWithCategory | null>;
+  findPlatformExpenseByReference(referenceId: string, client?: ExpenseDbClient): Promise<ExpenseWithCategory | null>;
   findJournalByExpenseReference(referenceId: string, client?: ExpenseDbClient): Promise<JournalEntryWithLines | null>;
   transaction<T>(callback: (client: Prisma.TransactionClient) => Promise<T>): Promise<T>;
 }

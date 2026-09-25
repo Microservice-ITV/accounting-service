@@ -28,6 +28,11 @@ enum ApprovalActionType {
   CANCELLED
 }
 
+enum ExpenseScope {
+  SHOP
+  PLATFORM
+}
+
 model AccountingStatus {
   id          String   @id @default(cuid())
   domain      String
@@ -87,7 +92,9 @@ model ExpenseCategory {
 model Expense {
   id            String        @id @default(cuid())
   expenseNo     String        @unique
+  scope         ExpenseScope  @default(SHOP)
   shopId        String?
+  createdByUserId String?
   sellerUserId  String?
   expenseTypeId String
   expenseAccountCode String @default("5000")
@@ -108,6 +115,8 @@ model Expense {
   statusDefinition AccountingStatus @relation("ExpenseStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
 
   @@index([shopId, status])
+  @@index([scope, status])
+  @@index([createdByUserId, status])
   @@index([sellerUserId, status])
   @@index([status, expenseDate])
   @@index([statusDomain, status])
@@ -116,6 +125,9 @@ model Expense {
 model ApprovalPolicy {
   id            String   @id @default(cuid())
   name          String
+  scope         ExpenseScope @default(SHOP)
+  shopId        String?
+  approverUserId String?
   minAmount     Decimal  @default(0)
   maxAmount     Decimal?
   level         Int      @default(1)
@@ -125,7 +137,7 @@ model ApprovalPolicy {
 
   conditions  ApprovalPolicyCondition[]
 
-  @@index([isActive, minAmount])
+  @@index([scope, shopId, isActive, minAmount])
 }
 
 model ApprovalPolicyCondition {

@@ -48,6 +48,8 @@ export class ExpenseApprovalController {
       const status = await this.approvalService.getExpenseApprovalStatus(
         getParam(req.params.expenseId),
         req.auth?.authorizedShopIds ?? [],
+        ['platform_super_admin', 'super_admin', 'platform_finance', 'finance_manager', 'platform_director', 'cfo']
+          .includes(req.auth?.role?.trim().toLowerCase() ?? ''),
       );
       return res.json(status);
     } catch (error) {

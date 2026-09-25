@@ -6,6 +6,10 @@ import {
   deleteApprovalPolicy,
   getApprovalPolicy,
   listApprovalPolicies,
+  listPlatformApprovalPolicies,
+  getPlatformApprovalPolicy,
+  setPlatformApprovalPolicyActive,
+  deletePlatformApprovalPolicy,
   listApprovalPolicyApproverOptions,
   setApprovalPolicyActive,
   updateApprovalPolicy,
@@ -29,12 +33,17 @@ function getParam(value: string | string[]) {
 }
 
 const policySchema = z.object({
-  shopId: z.string().trim().min(1),
+  scope: z.enum(['SHOP', 'PLATFORM']).default('SHOP'),
+  shopId: z.string().trim().min(1).nullable().optional(),
+  approverUserId: z.string().trim().min(1).nullable().optional(),
   name: z.string().trim().min(1).max(160),
   minAmount: z.coerce.number().finite().nonnegative(),
   maxAmount: z.coerce.number().finite().nonnegative().nullable().optional(),
   level: z.coerce.number().int().min(1).optional(),
   isActive: z.boolean().optional(),
+}).superRefine((input, context) => {
+  if (input.scope === 'SHOP' && !input.shopId) context.addIssue({ code: z.ZodIssueCode.custom, path: ['shopId'], message: 'shopId is required for shop policies' });
+  if (input.scope === 'PLATFORM' && input.shopId) context.addIssue({ code: z.ZodIssueCode.custom, path: ['shopId'], message: 'Platform policies cannot specify a shop' });
 });
 const activeSchema = z.object({ isActive: z.boolean() });
 
@@ -52,6 +61,9 @@ router.get('/approval-policies/approver-options', requireExpenseAuth, async (req
 
 router.get('/approval-policies', requireExpenseAuth, async (req, res) => {
   try {
+    if (req.query.scope === 'PLATFORM') {
+      return res.json({ policies: await listPlatformApprovalPolicies(getAuth(req)) });
+    }
     const shopId = z.string().trim().min(1).parse(req.query.shopId);
     return res.json({ policies: await listApprovalPolicies(shopId, getAuth(req)) });
   } catch (error) {
@@ -62,6 +74,9 @@ router.get('/approval-policies', requireExpenseAuth, async (req, res) => {
 
 router.get('/approval-policies/:id', requireExpenseAuth, async (req, res) => {
   try {
+    if (req.query.scope === 'PLATFORM') {
+      return res.json(await getPlatformApprovalPolicy(getParam(req.params.id), getAuth(req)));
+    }
     const shopId = z.string().trim().min(1).parse(req.query.shopId);
     return res.json(await getApprovalPolicy(getParam(req.params.id), shopId, getAuth(req)));
   } catch (error) {
@@ -74,7 +89,8 @@ router.post('/approval-policies', requireExpenseAuth, async (req, res) => {
   try {
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    return res.status(201).json(await createApprovalPolicy(policySchema.parse(req.body), getAuth(req), token));
+    const input = policySchema.parse(req.body);
+    return res.status(201).json(await createApprovalPolicy({ ...input, shopId: input.shopId ?? '' }, getAuth(req), token));
   } catch (error) {
     const message = error instanceof z.ZodError ? error.issues[0]?.message ?? 'Invalid policy payload' : error instanceof Error ? error.message : 'Failed to create approval policy';
     return res.status(/overlaps|must be|approver|At least|Only the Shop Owner|Unauthorized|Unauthenticated/.test(message) ? 400 : 500).json({ error: message });
@@ -85,7 +101,8 @@ router.patch('/approval-policies/:id', requireExpenseAuth, async (req, res) => {
   try {
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    return res.json(await updateApprovalPolicy(getParam(req.params.id), policySchema.parse(req.body), getAuth(req), token));
+    const input = policySchema.parse(req.body);
+    return res.json(await updateApprovalPolicy(getParam(req.params.id), { ...input, shopId: input.shopId ?? '' }, getAuth(req), token));
   } catch (error) {
     const message = error instanceof z.ZodError ? error.issues[0]?.message ?? 'Invalid policy payload' : error instanceof Error ? error.message : 'Failed to update approval policy';
     return res.status(/not found/i.test(message) ? 404 : /overlaps|must be|approver|At least|Only the Shop Owner|Unauthorized|Unauthenticated/.test(message) ? 400 : 500).json({ error: message });
@@ -94,6 +111,10 @@ router.patch('/approval-policies/:id', requireExpenseAuth, async (req, res) => {
 
 router.patch('/approval-policies/:id/status', requireExpenseAuth, async (req, res) => {
   try {
+    if (req.query.scope === 'PLATFORM') {
+      const payload = activeSchema.parse(req.body);
+      return res.json(await setPlatformApprovalPolicyActive(getParam(req.params.id), payload.isActive, getAuth(req)));
+    }
     const shopId = z.string().trim().min(1).parse(req.query.shopId);
     const payload = activeSchema.parse(req.body);
     return res.json(await setApprovalPolicyActive(getParam(req.params.id), shopId, payload.isActive, getAuth(req)));
@@ -105,6 +126,10 @@ router.patch('/approval-policies/:id/status', requireExpenseAuth, async (req, re
 
 router.delete('/approval-policies/:id', requireExpenseAuth, async (req, res) => {
   try {
+    if (req.query.scope === 'PLATFORM') {
+      await deletePlatformApprovalPolicy(getParam(req.params.id), getAuth(req));
+      return res.status(204).send();
+    }
     const shopId = z.string().trim().min(1).parse(req.query.shopId);
     await deleteApprovalPolicy(getParam(req.params.id), shopId, getAuth(req));
     return res.status(204).send();

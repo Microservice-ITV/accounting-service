@@ -62,9 +62,24 @@ export class ExpenseRepository implements IExpenseRepository {
     return client.expense.findMany({ where: { shopId: { in: shopIds } }, orderBy: { createdAt: 'desc' } });
   }
 
+  listPlatformExpenses(client: ExpenseDbClient = prisma) {
+    return client.expense.findMany({
+      where: { scope: 'PLATFORM' },
+      include: { expenseType: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   findExpenseByReference(referenceId: string, shopIds: string[], client: ExpenseDbClient = prisma) {
     return client.expense.findFirst({
       where: { expenseNo: referenceId, shopId: { in: shopIds } },
+      include: { expenseType: true },
+    });
+  }
+
+  findPlatformExpenseByReference(referenceId: string, client: ExpenseDbClient = prisma) {
+    return client.expense.findFirst({
+      where: { expenseNo: referenceId, scope: 'PLATFORM' },
       include: { expenseType: true },
     });
   }

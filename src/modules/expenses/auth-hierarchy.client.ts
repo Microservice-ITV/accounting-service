@@ -9,12 +9,14 @@ type AuthShopUser = {
 type AuthManager = {
   level?: number | null;
   shopUserId?: string | null;
+  platformUserId?: string | null;
   userId?: string | null;
   name?: string | null;
 };
 
 type ManagerChainResponse = {
   shopUserId?: string | null;
+  platformUserId?: string | null;
   managers?: AuthManager[];
 };
 
@@ -125,6 +127,47 @@ export async function resolveManagerChainFromAuth(
       throw new Error('Invalid manager-chain response from Auth Service');
     }
 
+    managerByLevel.set(manager.level, userId);
+  });
+
+  return managerByLevel;
+}
+
+export async function resolvePlatformManagerChainFromAuth(
+  platformUserId: string,
+  bearerToken?: string,
+): Promise<Map<number, string>> {
+  if (!bearerToken) {
+    throw new Error('Platform manager chain requires an Auth Service bearer token');
+  }
+
+  const chainPayload = await getAuthJson<{ data?: ManagerChainResponse } & ManagerChainResponse>(
+    `/platform-users/${encodeURIComponent(platformUserId)}/manager-chain`,
+    bearerToken,
+    'Platform manager chain is unavailable from Auth Service',
+  );
+  const chain = unwrapData<ManagerChainResponse>(chainPayload);
+
+  const returnedPlatformUserId = chain.platformUserId;
+  if (returnedPlatformUserId !== undefined && (!returnedPlatformUserId || !returnedPlatformUserId.trim())) {
+    throw new Error('Invalid platform manager-chain response from Auth Service');
+  }
+  if (!Array.isArray(chain.managers)) {
+    throw new Error('Invalid platform manager-chain response from Auth Service');
+  }
+
+  const managerByLevel = new Map<number, string>();
+  chain.managers.forEach((manager, index) => {
+    const expectedLevel = index + 1;
+    const userId = manager.userId?.trim();
+    if (
+      manager.level !== expectedLevel
+      || !manager.platformUserId
+      || !userId
+      || managerByLevel.has(manager.level)
+    ) {
+      throw new Error('Invalid platform manager-chain response from Auth Service');
+    }
     managerByLevel.set(manager.level, userId);
   });
 

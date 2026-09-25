@@ -41,7 +41,14 @@ function normalizeAuthContext(raw: any): AuthenticatedExpenseContext | null {
   }
 
   const shops = Array.isArray(accessContext?.shops) ? accessContext.shops : [];
+  const platformRoles = Array.isArray(accessContext?.platform_roles) ? accessContext.platform_roles : [];
   const activeShop = accessContext?.active_shop ?? null;
+  const platformRole = platformRoles.find((role: { code?: unknown }) => typeof role?.code === 'string')?.code;
+  const userRole = typeof user?.role === 'string'
+    ? user.role
+    : typeof user?.role?.code === 'string'
+      ? user.role.code
+      : undefined;
 
   const authorizedShopIds = shops
     .map((shop: { shop_id?: string | null }) => typeof shop?.shop_id === 'string' ? shop.shop_id.trim() : '')
@@ -55,7 +62,7 @@ function normalizeAuthContext(raw: any): AuthenticatedExpenseContext | null {
   return {
     userId,
     email: typeof user?.email === 'string' ? user.email : undefined,
-    role: typeof user?.role === 'string' ? user.role : undefined,
+    role: platformRole ?? userRole,
     activeShopId,
     authorizedShopIds: Array.from(new Set(authorizedShopIds)),
     shops,
@@ -89,7 +96,17 @@ export async function resolveAuthenticatedExpenseContext(req: Request): Promise<
     throw new Error('Unauthenticated');
   }
 
-  if (!context.activeShopId && context.authorizedShopIds.length === 0) {
+  const platformRoles = new Set([
+    'platform_super_admin',
+    'super_admin',
+    'platform_finance',
+    'platform_director',
+    'platform_cfo',
+    'cfo',
+  ]);
+  const isPlatformUser = platformRoles.has(context.role?.trim().toLowerCase() ?? '');
+
+  if (!context.activeShopId && context.authorizedShopIds.length === 0 && !isPlatformUser) {
     throw new Error('Seller is not assigned to any authorized shop');
   }
 

@@ -6,7 +6,9 @@ const SHOP_SCOPE_FIELD = 'shopId';
 const AMOUNT_FIELD = 'amount';
 
 export type ApprovalPolicyInput = {
+  scope?: 'SHOP' | 'PLATFORM';
   shopId: string;
+  approverUserId?: string | null;
   name: string;
   minAmount: number;
   maxAmount?: number | null;
@@ -35,6 +37,15 @@ type ApproverOption = {
 const policyInclude = {
   conditions: { orderBy: { createdAt: 'asc' as const } },
 };
+
+const platformPolicyRoles = new Set(['platform_super_admin', 'super_admin']);
+
+function assertPlatformPolicyAdmin(authContext: ExpenseAuthContext | null | undefined) {
+  if (!authContext?.userId) throw new Error('Unauthenticated');
+  if (!platformPolicyRoles.has(authContext.role?.trim().toLowerCase() ?? '')) {
+    throw new Error('Only a platform administrator can manage platform approval policies');
+  }
+}
 
 type PolicyDbClient = Prisma.TransactionClient | typeof prisma;
 
@@ -122,7 +133,10 @@ async function assertNoActiveOverlap(input: ApprovalPolicyInput, excludePolicyId
   const existingPolicies = await client.approvalPolicy.findMany({
     where: {
       isActive: true,
-      conditions: { some: { field: SHOP_SCOPE_FIELD, operator: '=', value: input.shopId } },
+      scope: input.scope ?? 'SHOP',
+      ...(input.scope === 'PLATFORM'
+        ? { shopId: null }
+        : { conditions: { some: { field: SHOP_SCOPE_FIELD, operator: '=', value: input.shopId ?? '' } } }),
       ...(excludePolicyId ? { id: { not: excludePolicyId } } : {}),
     },
     select: { id: true, name: true, minAmount: true, maxAmount: true },
@@ -139,9 +153,12 @@ async function assertNoActiveOverlap(input: ApprovalPolicyInput, excludePolicyId
 
 function buildConditions(input: ApprovalPolicyInput) {
   const conditions = [
-    { field: SHOP_SCOPE_FIELD, operator: '=', value: input.shopId },
+    { field: 'scope', operator: '=', value: input.scope ?? 'SHOP' },
     { field: AMOUNT_FIELD, operator: '>=', value: String(input.minAmount) },
   ];
+  if ((input.scope ?? 'SHOP') === 'SHOP') {
+    conditions.unshift({ field: SHOP_SCOPE_FIELD, operator: '=', value: input.shopId ?? '' });
+  }
   if (input.maxAmount !== null && input.maxAmount !== undefined) {
     conditions.push({ field: AMOUNT_FIELD, operator: '<=', value: String(input.maxAmount) });
   }
@@ -151,6 +168,9 @@ function buildConditions(input: ApprovalPolicyInput) {
 function policyData(input: ApprovalPolicyInput) {
   return {
     name: input.name.trim(),
+    scope: input.scope ?? 'SHOP',
+    shopId: input.scope === 'PLATFORM' ? null : input.shopId,
+    approverUserId: input.approverUserId ?? null,
     minAmount: input.minAmount,
     maxAmount: input.maxAmount ?? null,
     level: input.level ?? 1,
@@ -182,13 +202,53 @@ export async function getApprovalPolicy(id: string, shopId: string, authContext:
   return policy;
 }
 
+export async function listPlatformApprovalPolicies(authContext: ExpenseAuthContext) {
+  assertPlatformPolicyAdmin(authContext);
+  return prisma.approvalPolicy.findMany({
+    where: { scope: 'PLATFORM', shopId: null },
+    include: policyInclude,
+    orderBy: [{ level: 'asc' }, { minAmount: 'asc' }],
+  });
+}
+
+export async function getPlatformApprovalPolicy(id: string, authContext: ExpenseAuthContext) {
+  assertPlatformPolicyAdmin(authContext);
+  const policy = await prisma.approvalPolicy.findFirst({
+    where: { id, scope: 'PLATFORM', shopId: null },
+    include: policyInclude,
+  });
+  if (!policy) throw new Error('Approval policy not found');
+  return policy;
+}
+
+export async function setPlatformApprovalPolicyActive(id: string, isActive: boolean, authContext: ExpenseAuthContext) {
+  const existing = await getPlatformApprovalPolicy(id, authContext);
+  return prisma.$transaction(async (tx) => {
+    await lockPolicyShop(tx, 'PLATFORM');
+    if (isActive) {
+      await assertNoActiveOverlap({ scope: 'PLATFORM', shopId: '', name: existing.name, minAmount: Number(existing.minAmount), maxAmount: existing.maxAmount == null ? null : Number(existing.maxAmount), level: existing.level, isActive: true }, existing.id, tx);
+    }
+    return tx.approvalPolicy.update({ where: { id: existing.id }, data: { isActive }, include: policyInclude });
+  });
+}
+
+export async function deletePlatformApprovalPolicy(id: string, authContext: ExpenseAuthContext) {
+  const existing = await getPlatformApprovalPolicy(id, authContext);
+  if (existing.isActive) throw new Error('Deactivate the approval policy before deleting it');
+  await prisma.approvalPolicy.delete({ where: { id: existing.id } });
+}
+
 export async function createApprovalPolicy(input: ApprovalPolicyInput, authContext: ExpenseAuthContext, bearerToken: string) {
-  const normalizedShopId = assertShopOwner(authContext, input.shopId);
-  const normalizedInput = { ...input, shopId: normalizedShopId, name: input.name.trim() };
+  const scope = input.scope ?? 'SHOP';
+  const normalizedShopId = scope === 'SHOP' ? assertShopOwner(authContext, input.shopId ?? '') : null;
+  if (scope === 'PLATFORM' && !['platform_super_admin', 'super_admin'].includes(authContext.role?.toLowerCase() ?? '')) {
+    throw new Error('Only a platform administrator can manage platform approval policies');
+  }
+  const normalizedInput = { ...input, scope, shopId: normalizedShopId ?? '', name: input.name.trim(), approverUserId: input.approverUserId?.trim() || null };
   validateAmountRange(normalizedInput.minAmount, normalizedInput.maxAmount);
   validateLevel(normalizedInput.level ?? 1);
   return prisma.$transaction(async (tx) => {
-    await lockPolicyShop(tx, normalizedShopId);
+    await lockPolicyShop(tx, normalizedShopId ?? 'PLATFORM');
     await assertNoActiveOverlap(normalizedInput, undefined, tx);
     return tx.approvalPolicy.create({
       data: {
@@ -201,13 +261,18 @@ export async function createApprovalPolicy(input: ApprovalPolicyInput, authConte
 }
 
 export async function updateApprovalPolicy(id: string, input: ApprovalPolicyInput, authContext: ExpenseAuthContext, bearerToken: string) {
-  const existing = await getApprovalPolicy(id, input.shopId, authContext);
-  const normalizedShopId = assertShopOwner(authContext, input.shopId);
-  const normalizedInput = { ...input, shopId: normalizedShopId, name: input.name.trim() };
+  const scope = input.scope ?? 'SHOP';
+  const existing = scope === 'SHOP' ? await getApprovalPolicy(id, input.shopId ?? '', authContext) : await prisma.approvalPolicy.findUnique({ where: { id } });
+  if (!existing) throw new Error('Approval policy not found');
+  const normalizedShopId = scope === 'SHOP' ? assertShopOwner(authContext, input.shopId ?? '') : null;
+  if (scope === 'PLATFORM' && !['platform_super_admin', 'super_admin'].includes(authContext.role?.toLowerCase() ?? '')) {
+    throw new Error('Only a platform administrator can manage platform approval policies');
+  }
+  const normalizedInput = { ...input, scope, shopId: normalizedShopId ?? '', name: input.name.trim(), approverUserId: input.approverUserId?.trim() || null };
   validateAmountRange(normalizedInput.minAmount, normalizedInput.maxAmount);
   validateLevel(normalizedInput.level ?? 1);
   return prisma.$transaction(async (tx) => {
-    await lockPolicyShop(tx, normalizedShopId);
+    await lockPolicyShop(tx, normalizedShopId ?? 'PLATFORM');
     await assertNoActiveOverlap(normalizedInput, existing.id, tx);
     await tx.approvalPolicyCondition.deleteMany({ where: { approvalPolicyId: existing.id } });
     return tx.approvalPolicy.update({
