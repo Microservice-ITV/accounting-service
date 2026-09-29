@@ -6,9 +6,14 @@ MODE="${1:-}"
 IMAGE="${2:-}"
 
 DEPLOY_DIR="/var/www/html/microservices/accounting-service"
-COMPOSE_FILE="$DEPLOY_DIR/docker-compose.prod.yml"
+GATEWAY_DIR="/var/www/html/microservices/gateway"
+GATEWAY_NGINX_DIR="$GATEWAY_DIR/nginx"
 
+COMPOSE_FILE="$DEPLOY_DIR/docker-compose.prod.yml"
 NETWORK_NAME="itv-network"
+
+NGINX_CONTAINER="microservices-gateway"
+NGINX_UPSTREAM_FILE="$GATEWAY_NGINX_DIR/accounting-service-upstream.conf"
 
 case "$MODE" in
   staging)
@@ -26,9 +31,8 @@ case "$MODE" in
 
     BLUE_CONTAINER="accounting-service-blue"
     GREEN_CONTAINER="accounting-service-green"
+    LEGACY_CONTAINER="accounting-service"
 
-    NGINX_CONTAINER="microservices-gateway"
-    NGINX_UPSTREAM_FILE="/etc/nginx/conf.d/accounting-upstream.conf"
     APP_PORT="4005"
     ;;
 
@@ -37,7 +41,6 @@ case "$MODE" in
     exit 1
     ;;
 esac
-
 
 #####################################################
 # Validation
@@ -58,8 +61,12 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
   exit 1
 fi
 
-cd "$DEPLOY_DIR"
+if [[ "$MODE" == "production" && ! -d "$GATEWAY_NGINX_DIR" ]]; then
+  echo "❌ Gateway Nginx directory not found: $GATEWAY_NGINX_DIR"
+  exit 1
+fi
 
+cd "$DEPLOY_DIR"
 
 #####################################################
 # Helpers
@@ -72,7 +79,17 @@ log() {
 
 cleanup_image() {
   echo "🧹 Removing failed image..."
-  docker image rm "$IMAGE" 2>/dev/null || true
+  docker image rm "$IMAGE" >/dev/null 2>&1 || true
+}
+
+container_exists() {
+  docker container inspect "$1" >/dev/null 2>&1
+}
+
+container_running() {
+  [[ "$(docker inspect \
+    --format='{{.State.Status}}' \
+    "$1" 2>/dev/null || true)" == "running" ]]
 }
 
 wait_for_db() {
@@ -92,60 +109,80 @@ wait_for_db() {
       return 0
     fi
 
-    if [[ "$i" == "30" ]]; then
-      echo "❌ Database failed health check"
+    if [[ "$status" == "unhealthy" ]]; then
+      echo "❌ Database is unhealthy"
       docker logs --tail 150 "$container" || true
       return 1
     fi
 
+    echo "Database: $status ($i/30)"
     sleep 2
   done
+
+  echo "❌ Database failed health check"
+  docker logs --tail 150 "$container" || true
+
+  return 1
 }
 
-
-wait_for_http() {
+wait_for_container_health() {
   local container="$1"
-  local url="$2"
-  local label="$3"
+  local label="$2"
 
   echo "⏳ Waiting for $label..."
 
   for i in {1..30}; do
 
+    if ! container_exists "$container"; then
+      echo "⏳ Container not created yet... ($i/30)"
+      sleep 2
+      continue
+    fi
+
     local status
+
     status=$(docker inspect \
       --format='{{.State.Status}}' \
       "$container" 2>/dev/null || echo "missing")
 
-    if [[ "$status" == "exited" ]]; then
+    if [[ "$status" == "exited" || "$status" == "dead" ]]; then
       echo "❌ $label container exited"
+
       docker logs --tail 200 "$container" || true
+
       return 1
     fi
 
     if [[ "$status" != "running" ]]; then
-      echo "$label: $status"
-      sleep 5
+      echo "$label: $status ($i/30)"
+      sleep 2
       continue
     fi
 
-    local http_status
+    if docker exec "$container" node -e '
+      const http = require("http");
 
-    http_status=$(curl \
-      -s \
-      -o /dev/null \
-      -w "%{http_code}" \
-      --max-time 5 \
-      "$url" || true)
+      const req = http.get(
+        "http://127.0.0.1:4005/health",
+        res => {
+          process.exit(res.statusCode === 200 ? 0 : 1);
+        }
+      );
 
-    echo "$label: $status / HTTP $http_status"
+      req.on("error", () => process.exit(1));
 
-    if [[ "$http_status" == "200" ]]; then
+      req.setTimeout(5000, () => {
+        req.destroy();
+        process.exit(1);
+      });
+    ' >/dev/null 2>&1; then
+
       echo "✅ $label healthy"
       return 0
     fi
 
-    sleep 5
+    echo "$label: starting ($i/30)"
+    sleep 2
   done
 
   echo "❌ $label health check failed"
@@ -154,6 +191,138 @@ wait_for_http() {
   return 1
 }
 
+get_active_container() {
+  local active=""
+
+  # Prefer the persistent Nginx upstream state.
+  if [[ -f "$NGINX_UPSTREAM_FILE" ]]; then
+    active=$(sed -n \
+      's/^[[:space:]]*server[[:space:]]\+\([^:;[:space:]]*\):4005;.*/\1/p' \
+      "$NGINX_UPSTREAM_FILE" \
+      | head -n 1)
+  fi
+
+  if [[ -n "$active" ]] && container_running "$active"; then
+    echo "$active"
+    return 0
+  fi
+
+  # Fallback: detect blue/green.
+  if container_running "$BLUE_CONTAINER"; then
+    echo "$BLUE_CONTAINER"
+    return 0
+  fi
+
+  if container_running "$GREEN_CONTAINER"; then
+    echo "$GREEN_CONTAINER"
+    return 0
+  fi
+
+  # Fallback: detect old single-container deployment.
+  if container_running "$LEGACY_CONTAINER"; then
+    echo "$LEGACY_CONTAINER"
+    return 0
+  fi
+
+  echo ""
+}
+
+get_new_container() {
+  local current="$1"
+
+  if [[ "$current" == "$BLUE_CONTAINER" ]]; then
+    echo "$GREEN_CONTAINER"
+  else
+    echo "$BLUE_CONTAINER"
+  fi
+}
+
+write_upstream() {
+  local container="$1"
+  local target="$2"
+
+  cat > "$target" <<EOF
+upstream accounting_service_backend {
+    server ${container}:4005;
+}
+EOF
+}
+
+switch_nginx() {
+  local new_container="$1"
+  local previous_file=""
+  local backup_file=""
+
+  previous_file=$(mktemp)
+  backup_file=$(mktemp)
+
+  if [[ -f "$NGINX_UPSTREAM_FILE" ]]; then
+    cp "$NGINX_UPSTREAM_FILE" "$backup_file"
+  fi
+
+  cp "$NGINX_UPSTREAM_FILE" "$previous_file" 2>/dev/null || true
+
+  write_upstream "$new_container" "$NGINX_UPSTREAM_FILE"
+
+  if ! docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1; then
+    echo "❌ Nginx configuration validation failed"
+
+    if [[ -s "$previous_file" ]]; then
+      cp "$previous_file" "$NGINX_UPSTREAM_FILE"
+    else
+      rm -f "$NGINX_UPSTREAM_FILE"
+    fi
+
+    rm -f "$previous_file" "$backup_file"
+
+    return 1
+  fi
+
+  if ! docker exec "$NGINX_CONTAINER" nginx -s reload >/dev/null 2>&1; then
+    echo "❌ Nginx reload failed"
+
+    if [[ -s "$previous_file" ]]; then
+      cp "$previous_file" "$NGINX_UPSTREAM_FILE"
+    else
+      rm -f "$NGINX_UPSTREAM_FILE"
+    fi
+
+    docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1 || true
+    docker exec "$NGINX_CONTAINER" nginx -s reload >/dev/null 2>&1 || true
+
+    rm -f "$previous_file" "$backup_file"
+
+    return 1
+  fi
+
+  rm -f "$previous_file" "$backup_file"
+
+  return 0
+}
+
+verify_gateway() {
+  local new_container="$1"
+
+  echo "⏳ Verifying gateway → $new_container..."
+
+  for i in {1..10}; do
+
+    if docker exec "$NGINX_CONTAINER" \
+      curl -fsS \
+      --max-time 5 \
+      "http://${new_container}:4005/health" \
+      >/dev/null 2>&1; then
+
+      echo "✅ Gateway network can reach $new_container"
+      return 0
+    fi
+
+    echo "Gateway verification: retry $i/10"
+    sleep 2
+  done
+
+  return 1
+}
 
 #####################################################
 # Docker login
@@ -170,7 +339,6 @@ if [[ -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_TOKEN:-}" ]]; then
 
 fi
 
-
 #####################################################
 # Pull image
 #####################################################
@@ -181,7 +349,6 @@ if ! docker pull "$IMAGE"; then
   echo "❌ Failed to pull image"
   exit 1
 fi
-
 
 #####################################################
 # STAGING
@@ -207,15 +374,13 @@ if [[ "$MODE" == "staging" ]]; then
     exit 1
   fi
 
-
   ###################################################
   # Remove old staging container
   ###################################################
 
   log "Removing previous staging container"
 
-  docker rm -f "$APP_CONTAINER" 2>/dev/null || true
-
+  docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
   ###################################################
   # Start staging application
@@ -234,26 +399,25 @@ if [[ "$MODE" == "staging" ]]; then
 
     echo "❌ Failed to start staging application"
 
-    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     cleanup_image
+
     exit 1
   fi
-
 
   ###################################################
   # Health check
   ###################################################
 
-  if ! wait_for_http \
+  if ! wait_for_container_health \
     "$APP_CONTAINER" \
-    "http://127.0.0.1:${APP_PORT}/health" \
     "Staging application"; then
 
-    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     cleanup_image
+
     exit 1
   fi
-
 
   ###################################################
   # Smoke test
@@ -273,15 +437,14 @@ if [[ "$MODE" == "staging" ]]; then
     echo "❌ Staging smoke test failed"
 
     docker logs --tail 200 "$APP_CONTAINER" || true
-    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     cleanup_image
 
     exit 1
   fi
 
-
   ###################################################
-  # Staging success
+  # Success
   ###################################################
 
   echo
@@ -292,7 +455,6 @@ if [[ "$MODE" == "staging" ]]; then
   exit 0
 fi
 
-
 #####################################################
 # PRODUCTION
 #####################################################
@@ -302,14 +464,13 @@ echo "========================================="
 echo "🚀 ZERO-DOWNTIME PRODUCTION DEPLOYMENT"
 echo "========================================="
 
+export IMAGE_TAG="${IMAGE##*:}"
 
 #####################################################
 # Production database
 #####################################################
 
 log "Ensuring production database is healthy"
-
-export IMAGE_TAG="${IMAGE##*:}"
 
 docker compose \
   --env-file "$ENV_FILE" \
@@ -321,37 +482,31 @@ if ! wait_for_db "$DB_CONTAINER"; then
   exit 1
 fi
 
-
 #####################################################
 # Detect active container
 #####################################################
 
-CURRENT_CONTAINER=""
+CURRENT_CONTAINER="$(get_active_container)"
 
-if docker ps --format '{{.Names}}' | grep -qx "$BLUE_CONTAINER"; then
-  CURRENT_CONTAINER="$BLUE_CONTAINER"
-elif docker ps --format '{{.Names}}' | grep -qx "$GREEN_CONTAINER"; then
-  CURRENT_CONTAINER="$GREEN_CONTAINER"
-fi
-
+echo
+echo "Current container : ${CURRENT_CONTAINER:-none}"
 
 #####################################################
 # Select inactive color
 #####################################################
 
-if [[ "$CURRENT_CONTAINER" == "$BLUE_CONTAINER" ]]; then
-  NEW_CONTAINER="$GREEN_CONTAINER"
-elif [[ "$CURRENT_CONTAINER" == "$GREEN_CONTAINER" ]]; then
-  NEW_CONTAINER="$BLUE_CONTAINER"
-else
-  NEW_CONTAINER="$BLUE_CONTAINER"
-fi
+NEW_CONTAINER="$(get_new_container "$CURRENT_CONTAINER")"
 
-
-echo
-echo "Current container : ${CURRENT_CONTAINER:-none}"
 echo "New container     : $NEW_CONTAINER"
 
+#####################################################
+# Safety check
+#####################################################
+
+if [[ "$CURRENT_CONTAINER" == "$NEW_CONTAINER" ]]; then
+  echo "❌ New container is already active"
+  exit 1
+fi
 
 #####################################################
 # Remove inactive container
@@ -359,11 +514,10 @@ echo "New container     : $NEW_CONTAINER"
 
 log "Cleaning inactive deployment"
 
-docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
-
+docker rm -f "$NEW_CONTAINER" >/dev/null 2>&1 || true
 
 #####################################################
-# Start new container
+# Start new production container
 #####################################################
 
 log "Starting new production container"
@@ -378,26 +532,24 @@ if ! docker run -d \
 
   echo "❌ Failed to start new production container"
 
-  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  docker rm -f "$NEW_CONTAINER" >/dev/null 2>&1 || true
   cleanup_image
 
   exit 1
 fi
-
 
 #####################################################
 # Health check new container
 #####################################################
 
-if ! wait_for_http \
+if ! wait_for_container_health \
   "$NEW_CONTAINER" \
-  "http://${NEW_CONTAINER}:4005/health" \
   "New production application"; then
 
   echo
   echo "❌ New production deployment failed"
 
-  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  docker rm -f "$NEW_CONTAINER" >/dev/null 2>&1 || true
   cleanup_image
 
   echo "✅ Existing production container remains untouched"
@@ -405,28 +557,22 @@ if ! wait_for_http \
   exit 1
 fi
 
-
 #####################################################
-# Verify from Docker network
+# Verify Docker network connectivity
 #####################################################
 
-log "Running internal production smoke test"
+log "Verifying production Docker network"
 
-SMOKE_STATUS=$(docker run --rm \
-  --network "$NETWORK_NAME" \
-  curlimages/curl:8.10.1 \
-  -s \
-  -o /dev/null \
-  -w "%{http_code}" \
+if ! docker exec "$NGINX_CONTAINER" \
+  curl -fsS \
   --max-time 10 \
-  "http://${NEW_CONTAINER}:4005/health" || true)
+  "http://${NEW_CONTAINER}:4005/health" \
+  >/dev/null 2>&1; then
 
-if [[ "$SMOKE_STATUS" != "200" ]]; then
-
-  echo "❌ Internal production smoke test failed"
+  echo "❌ Gateway cannot reach new production container"
 
   docker logs --tail 200 "$NEW_CONTAINER" || true
-  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  docker rm -f "$NEW_CONTAINER" >/dev/null 2>&1 || true
   cleanup_image
 
   echo "✅ Existing production container remains untouched"
@@ -434,6 +580,7 @@ if [[ "$SMOKE_STATUS" != "200" ]]; then
   exit 1
 fi
 
+echo "✅ Gateway can reach $NEW_CONTAINER"
 
 #####################################################
 # Switch Nginx traffic
@@ -441,141 +588,72 @@ fi
 
 log "Switching Nginx traffic"
 
-echo "upstream accounting_service_backend {" \
-  > /tmp/accounting-upstream.conf
+if ! switch_nginx "$NEW_CONTAINER"; then
 
-echo "    server ${NEW_CONTAINER}:4005;" \
-  >> /tmp/accounting-upstream.conf
+  echo "❌ Failed to switch Nginx traffic"
 
-echo "}" \
-  >> /tmp/accounting-upstream.conf
-
-
-docker cp \
-  /tmp/accounting-upstream.conf \
-  "${NGINX_CONTAINER}:${NGINX_UPSTREAM_FILE}"
-
-
-#####################################################
-# Validate Nginx configuration
-#####################################################
-
-log "Validating Nginx configuration"
-
-if ! docker exec "$NGINX_CONTAINER" nginx -t; then
-
-  echo "❌ Nginx configuration validation failed"
-
-  echo "🔄 Keeping existing production container"
-
-  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  docker rm -f "$NEW_CONTAINER" >/dev/null 2>&1 || true
   cleanup_image
+
+  echo "✅ Existing production container remains untouched"
 
   exit 1
 fi
 
+echo "✅ Nginx traffic switched to $NEW_CONTAINER"
 
 #####################################################
-# Reload Nginx
+# Verify new container after traffic switch
 #####################################################
 
-log "Reloading Nginx"
+log "Verifying production deployment"
 
-if ! docker exec "$NGINX_CONTAINER" nginx -s reload; then
+if ! verify_gateway "$NEW_CONTAINER"; then
 
-  echo "❌ Nginx reload failed"
+  echo "❌ Production verification failed"
 
-  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
-  cleanup_image
+  ###################################################
+  # Rollback Nginx
+  ###################################################
 
-  exit 1
-fi
-
-
-#####################################################
-# Verify traffic after switch
-#####################################################
-
-log "Verifying production traffic"
-
-TRAFFIC_OK=false
-
-for i in {1..10}; do
-
-  HTTP_STATUS=$(curl \
-    -s \
-    -o /dev/null \
-    -w "%{http_code}" \
-    --max-time 5 \
-    "http://127.0.0.1/health" || true)
-
-  echo "Gateway: HTTP $HTTP_STATUS"
-
-  if [[ "$HTTP_STATUS" == "200" ]]; then
-    TRAFFIC_OK=true
-    break
-  fi
-
-  sleep 2
-done
-
-
-#####################################################
-# Traffic rollback
-#####################################################
-
-if [[ "$TRAFFIC_OK" != "true" ]]; then
-
-  echo "❌ Production traffic verification failed"
-
-  if [[ -n "$CURRENT_CONTAINER" ]]; then
+  if [[ -n "$CURRENT_CONTAINER" ]] &&
+     container_running "$CURRENT_CONTAINER"; then
 
     echo "🔄 Rolling traffic back to $CURRENT_CONTAINER"
 
-    echo "upstream accounting_service_backend {" \
-      > /tmp/accounting-upstream.conf
-
-    echo "    server ${CURRENT_CONTAINER}:4005;" \
-      >> /tmp/accounting-upstream.conf
-
-    echo "}" \
-      >> /tmp/accounting-upstream.conf
-
-    docker cp \
-      /tmp/accounting-upstream.conf \
-      "${NGINX_CONTAINER}:${NGINX_UPSTREAM_FILE}"
-
-    if docker exec "$NGINX_CONTAINER" nginx -t; then
-      docker exec "$NGINX_CONTAINER" nginx -s reload
+    if switch_nginx "$CURRENT_CONTAINER"; then
       echo "✅ Traffic rollback completed"
     else
-      echo "🚨 CRITICAL: Nginx rollback configuration failed"
+      echo "🚨 CRITICAL: Nginx rollback failed"
+      echo "🚨 Manual Nginx recovery may be required"
     fi
+
+  else
+
+    echo "ℹ️ No previous production container available for rollback"
 
   fi
 
-  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  docker rm -f "$NEW_CONTAINER" >/dev/null 2>&1 || true
   cleanup_image
 
   exit 1
 fi
 
-
 #####################################################
-# Remove previous container
+# Remove previous production container
 #####################################################
 
 if [[ -n "$CURRENT_CONTAINER" ]]; then
 
   log "Removing previous production container"
 
-  docker rm -f "$CURRENT_CONTAINER" 2>/dev/null || true
+  docker rm -f "$CURRENT_CONTAINER" >/dev/null 2>&1 || true
 
 else
 
   echo "ℹ️ No previous production container"
 fi
-
 
 #####################################################
 # Cleanup dangling images
@@ -583,8 +661,7 @@ fi
 
 log "Cleaning dangling Docker images"
 
-docker image prune -f
-
+docker image prune -f >/dev/null 2>&1 || true
 
 #####################################################
 # Final status
@@ -596,7 +673,6 @@ echo "📊 Production containers:"
 docker ps \
   --filter "name=accounting-service-" \
   --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
 
 echo
 echo "========================================="
