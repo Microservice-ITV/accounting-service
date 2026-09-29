@@ -12,7 +12,8 @@ case "$MODE" in
   staging)
     ENV_FILE="$DEPLOY_DIR/.env.staging"
     APP_CONTAINER="accounting-service-staging"
-    DB_SERVICE="accounting-db-staging"
+    DB_SERVICE="accounting-db"
+    DB_CONTAINER="accounting-db-staging"
     APP_PORT="14005"
     ;;
 
@@ -20,6 +21,7 @@ case "$MODE" in
     ENV_FILE="$DEPLOY_DIR/.env.prod"
     APP_CONTAINER="accounting-service"
     DB_SERVICE="accounting-db"
+    DB_CONTAINER="accounting-db"
     APP_PORT="4005"
     ;;
 
@@ -99,7 +101,7 @@ if [[ "$MODE" == "staging" ]]; then
 
     STATUS=$(docker inspect \
       --format='{{.State.Health.Status}}' \
-      "$DB_SERVICE" 2>/dev/null || echo "starting")
+      "$DB_CONTAINER" 2>/dev/null || echo "starting")
 
     if [[ "$STATUS" == "healthy" ]]; then
       echo "✅ Staging database healthy"
@@ -108,6 +110,7 @@ if [[ "$MODE" == "staging" ]]; then
 
     if [[ "$i" == "30" ]]; then
       echo "❌ Staging database failed"
+      docker logs --tail 150 "$DB_CONTAINER" || true
       exit 1
     fi
 
@@ -166,7 +169,7 @@ if [[ "$MODE" == "staging" ]]; then
 
 
   ###################################################
-  # Smoke test
+  # Staging smoke test
   ###################################################
 
   echo "🔍 Running staging smoke test..."
@@ -187,6 +190,7 @@ if [[ "$MODE" == "staging" ]]; then
   echo "✅ Staging validation passed"
 
   exit 0
+
 fi
 
 
@@ -195,6 +199,7 @@ fi
 #####################################################
 
 echo "🚀 Starting production deployment..."
+
 
 #####################################################
 # Detect previous image
@@ -228,7 +233,7 @@ for i in {1..30}; do
 
   STATUS=$(docker inspect \
     --format='{{.State.Health.Status}}' \
-    "$DB_SERVICE" 2>/dev/null || echo "starting")
+    "$DB_CONTAINER" 2>/dev/null || echo "starting")
 
   if [[ "$STATUS" == "healthy" ]]; then
     echo "✅ Production database healthy"
@@ -237,6 +242,7 @@ for i in {1..30}; do
 
   if [[ "$i" == "30" ]]; then
     echo "❌ Production database failed"
+    docker logs --tail 150 "$DB_CONTAINER" || true
     exit 1
   fi
 
@@ -260,7 +266,7 @@ docker compose \
 
 
 #####################################################
-# Wait for health
+# Wait for production health
 #####################################################
 
 echo "⏳ Waiting for production application..."
@@ -324,13 +330,26 @@ rollback() {
     -p "127.0.0.1:${APP_PORT}:4005" \
     "$PREVIOUS_IMAGE"
 
+
   echo "⏳ Waiting for rollback..."
 
   for i in {1..30}; do
 
+    STATUS=$(docker inspect \
+      --format='{{.State.Status}}' \
+      "$APP_CONTAINER" 2>/dev/null || echo "missing")
+
+    if [[ "$STATUS" == "exited" ]]; then
+      echo "❌ Rollback application exited"
+      docker logs --tail 200 "$APP_CONTAINER" || true
+      exit 1
+    fi
+
     HEALTH=$(docker inspect \
       --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' \
       "$APP_CONTAINER" 2>/dev/null || echo "starting")
+
+    echo "Rollback: $STATUS / $HEALTH"
 
     if [[ "$HEALTH" == "healthy" ]]; then
       echo "✅ Rollback successful"
@@ -411,6 +430,7 @@ docker compose \
 echo "🧹 Cleaning unused Docker images..."
 
 docker image prune -f
+
 
 echo "========================================="
 echo "✅ DEPLOYMENT SUCCESSFUL"
