@@ -69,7 +69,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
     volumes:
-      - accounting-postgres-data:/var/lib/postgresql/data
+      accounting-postgres-data:
+        name: ${POSTGRES_VOLUME_NAME}
 
     ports:
       - "127.0.0.1:${POSTGRES_PORT}:5432"
