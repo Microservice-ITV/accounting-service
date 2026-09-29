@@ -2,11 +2,18 @@
 
 set -e
 
-echo "Starting Accounting Service..."
+echo "========================================="
+echo "Starting Accounting Service"
+echo "========================================="
 
 echo "Running Prisma migrations..."
 
-npx prisma migrate deploy
+if ! npx prisma migrate deploy; then
+    echo "❌ Prisma migration failed"
+    exit 1
+fi
+
+echo "✅ Prisma migrations completed"
 
 echo "Starting production server..."
 
