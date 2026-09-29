@@ -1,7 +1,13 @@
 node_modules
-npm-debug.log*
 dist
-coverage
 .git
+.github
 .env
+.env.*
+coverage
+tests
 *.log
+npm-debug.log
+Dockerfile*
+docker-compose*.yml
+README.md

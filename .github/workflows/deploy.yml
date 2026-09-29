@@ -1,0 +1,162 @@
+name: 🚀 Accounting Service Production Deploy
+
+on:
+  push:
+    branches:
+      - master
+
+concurrency:
+  group: accounting-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/accounting-service
+
+jobs:
+
+  #####################################################
+  # BUILD & TEST
+  #####################################################
+
+  build:
+    name: 🐳 Build & Push
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔍 TypeScript validation
+        run: npm run lint
+
+      - name: 🧪 Run tests
+        run: npm test
+
+      - name: 🐳 Docker Hub Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: 🏗️ Build & Push Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.prod
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+
+
+  #####################################################
+  # STAGING
+  #####################################################
+
+  staging:
+    name: 🧪 Staging Validation
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📤 Upload deployment files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          source: "docker-compose.prod.yml,scripts/deploy.sh"
+          target: "/var/www/html/microservices/accounting-service/"
+
+      - name: 🧪 Deploy & Validate Staging
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          command_timeout: 10m
+
+          script: |
+            set -e
+
+            cd /var/www/html/microservices/accounting-service
+
+            chmod +x scripts/deploy.sh
+
+            cat > .env.staging <<'EOF'
+            ${{ secrets.STAGING_ENV }}
+            EOF
+
+            chmod 600 .env.staging
+
+            ./scripts/deploy.sh staging \
+              "${{ env.IMAGE_NAME }}:${{ github.sha }}"
+
+
+  #####################################################
+  # PRODUCTION
+  #####################################################
+
+  production:
+    name: 🚀 Production Deployment
+    runs-on: ubuntu-latest
+    needs: staging
+
+    environment:
+      name: production
+
+    steps:
+
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📤 Upload deployment files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          source: "docker-compose.prod.yml,scripts/deploy.sh"
+          target: "/var/www/html/microservices/accounting-service/"
+
+      - name: 🚀 Deploy Production
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          command_timeout: 15m
+
+          script: |
+            set -e
+
+            cd /var/www/html/microservices/accounting-service
+
+            chmod +x scripts/deploy.sh
+
+            cat > .env.prod <<'EOF'
+            ${{ secrets.PROD_ENV }}
+            EOF
+
+            chmod 600 .env.prod
+
+            ./scripts/deploy.sh production \
+              "${{ env.IMAGE_NAME }}:${{ github.sha }}"
