@@ -56,19 +56,13 @@ COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/node_modules/@prisma ./node_modules/@prisma
 
-# Runtime entrypoint
-COPY docker ./docker
+COPY docker/node/docker-entrypoint.prod.sh /usr/local/bin/docker-entrypoint.prod.sh
 
-RUN chmod +x docker/entrypoint.sh \
+RUN chmod +x /usr/local/bin/docker-entrypoint.prod.sh \
     && chown -R app:app /var/www/html/accounting-service
 
 USER app
 
-EXPOSE 4005
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD node -e "require('http').get('http://127.0.0.1:4005/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
-
-ENTRYPOINT ["./docker/node/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.prod.sh"]
 
 CMD ["node", "dist/server.js"]
