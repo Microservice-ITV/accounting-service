@@ -8,6 +8,8 @@ IMAGE="${2:-}"
 DEPLOY_DIR="/var/www/html/microservices/accounting-service"
 COMPOSE_FILE="$DEPLOY_DIR/docker-compose.prod.yml"
 
+NETWORK_NAME="itv-network"
+
 case "$MODE" in
   staging)
     ENV_FILE="$DEPLOY_DIR/.env.staging"
@@ -19,9 +21,14 @@ case "$MODE" in
 
   production)
     ENV_FILE="$DEPLOY_DIR/.env.prod"
-    APP_CONTAINER="accounting-service"
     DB_SERVICE="accounting-db"
     DB_CONTAINER="accounting-db"
+
+    BLUE_CONTAINER="accounting-service-blue"
+    GREEN_CONTAINER="accounting-service-green"
+
+    NGINX_CONTAINER="microservices-gateway"
+    NGINX_UPSTREAM_FILE="/etc/nginx/conf.d/accounting-upstream.conf"
     APP_PORT="4005"
     ;;
 
@@ -30,6 +37,11 @@ case "$MODE" in
     exit 1
     ;;
 esac
+
+
+#####################################################
+# Validation
+#####################################################
 
 if [[ -z "$IMAGE" ]]; then
   echo "❌ Docker image is required"
@@ -48,20 +60,108 @@ fi
 
 cd "$DEPLOY_DIR"
 
-echo "========================================="
-echo "🚀 Accounting Service Deployment"
-echo "Mode : $MODE"
-echo "Image: $IMAGE"
-echo "========================================="
+
+#####################################################
+# Helpers
+#####################################################
+
+log() {
+  echo
+  echo "▶ $1"
+}
+
+cleanup_image() {
+  echo "🧹 Removing failed image..."
+  docker image rm "$IMAGE" 2>/dev/null || true
+}
+
+wait_for_db() {
+  local container="$1"
+
+  echo "⏳ Waiting for database..."
+
+  for i in {1..30}; do
+    local status
+
+    status=$(docker inspect \
+      --format='{{.State.Health.Status}}' \
+      "$container" 2>/dev/null || echo "starting")
+
+    if [[ "$status" == "healthy" ]]; then
+      echo "✅ Database healthy"
+      return 0
+    fi
+
+    if [[ "$i" == "30" ]]; then
+      echo "❌ Database failed health check"
+      docker logs --tail 150 "$container" || true
+      return 1
+    fi
+
+    sleep 2
+  done
+}
+
+
+wait_for_http() {
+  local container="$1"
+  local url="$2"
+  local label="$3"
+
+  echo "⏳ Waiting for $label..."
+
+  for i in {1..30}; do
+
+    local status
+    status=$(docker inspect \
+      --format='{{.State.Status}}' \
+      "$container" 2>/dev/null || echo "missing")
+
+    if [[ "$status" == "exited" ]]; then
+      echo "❌ $label container exited"
+      docker logs --tail 200 "$container" || true
+      return 1
+    fi
+
+    if [[ "$status" != "running" ]]; then
+      echo "$label: $status"
+      sleep 5
+      continue
+    fi
+
+    local http_status
+
+    http_status=$(curl \
+      -s \
+      -o /dev/null \
+      -w "%{http_code}" \
+      --max-time 5 \
+      "$url" || true)
+
+    echo "$label: $status / HTTP $http_status"
+
+    if [[ "$http_status" == "200" ]]; then
+      echo "✅ $label healthy"
+      return 0
+    fi
+
+    sleep 5
+  done
+
+  echo "❌ $label health check failed"
+  docker logs --tail 200 "$container" || true
+
+  return 1
+}
 
 
 #####################################################
 # Docker login
 #####################################################
 
-if [[ -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_TOKEN:-}" ]]; then
+log "Docker login"
 
-  echo "🔐 Logging into Docker Hub..."
+if [[ -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_TOKEN:-}" ]]; then
 
   echo "$DOCKER_TOKEN" |
     docker login \
@@ -72,12 +172,15 @@ fi
 
 
 #####################################################
-# Pull immutable image
+# Pull image
 #####################################################
 
-echo "🐳 Pulling image..."
+log "Pulling image"
 
-docker pull "$IMAGE"
+if ! docker pull "$IMAGE"; then
+  echo "❌ Failed to pull image"
+  exit 1
+fi
 
 
 #####################################################
@@ -86,93 +189,77 @@ docker pull "$IMAGE"
 
 if [[ "$MODE" == "staging" ]]; then
 
-  echo "🧪 Starting staging database..."
-
   export IMAGE_TAG="${IMAGE##*:}"
+
+  ###################################################
+  # Database
+  ###################################################
+
+  log "Starting staging database"
 
   docker compose \
     --env-file "$ENV_FILE" \
     -f "$COMPOSE_FILE" \
     up -d "$DB_SERVICE"
 
-  echo "⏳ Waiting for staging database..."
-
-  for i in {1..30}; do
-
-    STATUS=$(docker inspect \
-      --format='{{.State.Health.Status}}' \
-      "$DB_CONTAINER" 2>/dev/null || echo "starting")
-
-    if [[ "$STATUS" == "healthy" ]]; then
-      echo "✅ Staging database healthy"
-      break
-    fi
-
-    if [[ "$i" == "30" ]]; then
-      echo "❌ Staging database failed"
-      docker logs --tail 150 "$DB_CONTAINER" || true
-      exit 1
-    fi
-
-    sleep 2
-
-  done
+  if ! wait_for_db "$DB_CONTAINER"; then
+    cleanup_image
+    exit 1
+  fi
 
 
-  echo "🚀 Starting staging application..."
+  ###################################################
+  # Remove old staging container
+  ###################################################
+
+  log "Removing previous staging container"
 
   docker rm -f "$APP_CONTAINER" 2>/dev/null || true
 
-  docker run -d \
+
+  ###################################################
+  # Start staging application
+  ###################################################
+
+  log "Starting staging application"
+
+  if ! docker run -d \
     --name "$APP_CONTAINER" \
     --restart=no \
     --init \
     --env-file "$ENV_FILE" \
-    --network itv-network \
+    --network "$NETWORK_NAME" \
     -p "127.0.0.1:${APP_PORT}:4005" \
-    "$IMAGE"
+    "$IMAGE"; then
 
+    echo "❌ Failed to start staging application"
 
-  echo "⏳ Waiting for staging application..."
-
-  for i in {1..30}; do
-
-    STATUS=$(docker inspect \
-      --format='{{.State.Status}}' \
-      "$APP_CONTAINER" 2>/dev/null || echo "missing")
-
-    if [[ "$STATUS" == "exited" ]]; then
-      echo "❌ Staging application exited"
-      docker logs --tail 150 "$APP_CONTAINER"
-      exit 1
-    fi
-
-    HEALTH=$(docker inspect \
-      --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' \
-      "$APP_CONTAINER" 2>/dev/null || echo "starting")
-
-    echo "Staging: $STATUS / $HEALTH"
-
-    if [[ "$HEALTH" == "healthy" ]]; then
-      break
-    fi
-
-    if [[ "$i" == "30" ]]; then
-      echo "❌ Staging health check failed"
-      docker logs --tail 150 "$APP_CONTAINER"
-      exit 1
-    fi
-
-    sleep 5
-
-  done
+    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+    cleanup_image
+    exit 1
+  fi
 
 
   ###################################################
-  # Staging smoke test
+  # Health check
   ###################################################
 
-  echo "🔍 Running staging smoke test..."
+  if ! wait_for_http \
+    "$APP_CONTAINER" \
+    "http://127.0.0.1:${APP_PORT}/health" \
+    "Staging application"; then
+
+    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+    cleanup_image
+    exit 1
+  fi
+
+
+  ###################################################
+  # Smoke test
+  ###################################################
+
+  log "Running staging smoke test"
 
   HTTP_STATUS=$(curl \
     -s \
@@ -182,15 +269,27 @@ if [[ "$MODE" == "staging" ]]; then
     "http://127.0.0.1:${APP_PORT}/health" || true)
 
   if [[ "$HTTP_STATUS" != "200" ]]; then
+
     echo "❌ Staging smoke test failed"
-    docker logs --tail 150 "$APP_CONTAINER"
+
+    docker logs --tail 200 "$APP_CONTAINER" || true
+    docker rm -f "$APP_CONTAINER" 2>/dev/null || true
+    cleanup_image
+
     exit 1
   fi
 
-  echo "✅ Staging validation passed"
+
+  ###################################################
+  # Staging success
+  ###################################################
+
+  echo
+  echo "========================================="
+  echo "✅ STAGING VALIDATION PASSED"
+  echo "========================================="
 
   exit 0
-
 fi
 
 
@@ -198,240 +297,311 @@ fi
 # PRODUCTION
 #####################################################
 
-echo "🚀 Starting production deployment..."
+echo
+echo "========================================="
+echo "🚀 ZERO-DOWNTIME PRODUCTION DEPLOYMENT"
+echo "========================================="
 
 
 #####################################################
-# Detect previous image
+# Production database
 #####################################################
 
-PREVIOUS_IMAGE=$(docker inspect \
-  --format='{{.Config.Image}}' \
-  "$APP_CONTAINER" 2>/dev/null || true)
-
-if [[ -n "$PREVIOUS_IMAGE" ]]; then
-  echo "💾 Previous image: $PREVIOUS_IMAGE"
-else
-  echo "ℹ️ No previous production image found"
-fi
-
-
-#####################################################
-# Ensure production database is running
-#####################################################
+log "Ensuring production database is healthy"
 
 export IMAGE_TAG="${IMAGE##*:}"
-
-echo "🐘 Ensuring production database is healthy..."
 
 docker compose \
   --env-file "$ENV_FILE" \
   -f "$COMPOSE_FILE" \
   up -d "$DB_SERVICE"
 
-for i in {1..30}; do
-
-  STATUS=$(docker inspect \
-    --format='{{.State.Health.Status}}' \
-    "$DB_CONTAINER" 2>/dev/null || echo "starting")
-
-  if [[ "$STATUS" == "healthy" ]]; then
-    echo "✅ Production database healthy"
-    break
-  fi
-
-  if [[ "$i" == "30" ]]; then
-    echo "❌ Production database failed"
-    docker logs --tail 150 "$DB_CONTAINER" || true
-    exit 1
-  fi
-
-  sleep 2
-
-done
-
-
-#####################################################
-# Start new production application
-#####################################################
-
-echo "🔄 Replacing production application..."
-
-docker rm -f "$APP_CONTAINER" 2>/dev/null || true
-
-docker compose \
-  --env-file "$ENV_FILE" \
-  -f "$COMPOSE_FILE" \
-  up -d accounting-app
-
-
-#####################################################
-# Wait for production health
-#####################################################
-
-echo "⏳ Waiting for production application..."
-
-HEALTHY=false
-
-for i in {1..30}; do
-
-  STATUS=$(docker inspect \
-    --format='{{.State.Status}}' \
-    "$APP_CONTAINER" 2>/dev/null || echo "missing")
-
-  if [[ "$STATUS" == "exited" ]]; then
-    echo "❌ Production application exited"
-    break
-  fi
-
-  HEALTH=$(docker inspect \
-    --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' \
-    "$APP_CONTAINER" 2>/dev/null || echo "starting")
-
-  echo "Production: $STATUS / $HEALTH"
-
-  if [[ "$HEALTH" == "healthy" ]]; then
-    HEALTHY=true
-    break
-  fi
-
-  sleep 5
-
-done
-
-
-#####################################################
-# Rollback function
-#####################################################
-
-rollback() {
-
-  echo "========================================="
-  echo "🔄 AUTOMATIC ROLLBACK"
-  echo "========================================="
-
-  if [[ -z "$PREVIOUS_IMAGE" ]]; then
-    echo "🚨 No previous image available"
-    exit 1
-  fi
-
-  echo "Restoring: $PREVIOUS_IMAGE"
-
-  docker pull "$PREVIOUS_IMAGE"
-
-  docker rm -f "$APP_CONTAINER" 2>/dev/null || true
-
-  docker run -d \
-    --name "$APP_CONTAINER" \
-    --restart=unless-stopped \
-    --init \
-    --env-file "$ENV_FILE" \
-    --network itv-network \
-    -p "127.0.0.1:${APP_PORT}:4005" \
-    "$PREVIOUS_IMAGE"
-
-
-  echo "⏳ Waiting for rollback..."
-
-  for i in {1..30}; do
-
-    STATUS=$(docker inspect \
-      --format='{{.State.Status}}' \
-      "$APP_CONTAINER" 2>/dev/null || echo "missing")
-
-    if [[ "$STATUS" == "exited" ]]; then
-      echo "❌ Rollback application exited"
-      docker logs --tail 200 "$APP_CONTAINER" || true
-      exit 1
-    fi
-
-    HEALTH=$(docker inspect \
-      --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' \
-      "$APP_CONTAINER" 2>/dev/null || echo "starting")
-
-    echo "Rollback: $STATUS / $HEALTH"
-
-    if [[ "$HEALTH" == "healthy" ]]; then
-      echo "✅ Rollback successful"
-      return 0
-    fi
-
-    sleep 5
-
-  done
-
-  echo "🚨 Rollback health check failed"
-
-  docker logs --tail 200 "$APP_CONTAINER" || true
-
+if ! wait_for_db "$DB_CONTAINER"; then
+  cleanup_image
   exit 1
-}
-
-
-#####################################################
-# Health failure
-#####################################################
-
-if [[ "$HEALTHY" != "true" ]]; then
-
-  echo "❌ New production image failed health check"
-
-  docker logs --tail 200 "$APP_CONTAINER" || true
-
-  rollback
-
-  exit 1
-
 fi
 
 
 #####################################################
-# Production smoke test
+# Detect active container
 #####################################################
 
-echo "🔍 Running production smoke test..."
+CURRENT_CONTAINER=""
 
-HTTP_STATUS=$(curl \
+if docker ps --format '{{.Names}}' | grep -qx "$BLUE_CONTAINER"; then
+  CURRENT_CONTAINER="$BLUE_CONTAINER"
+elif docker ps --format '{{.Names}}' | grep -qx "$GREEN_CONTAINER"; then
+  CURRENT_CONTAINER="$GREEN_CONTAINER"
+fi
+
+
+#####################################################
+# Select inactive color
+#####################################################
+
+if [[ "$CURRENT_CONTAINER" == "$BLUE_CONTAINER" ]]; then
+  NEW_CONTAINER="$GREEN_CONTAINER"
+elif [[ "$CURRENT_CONTAINER" == "$GREEN_CONTAINER" ]]; then
+  NEW_CONTAINER="$BLUE_CONTAINER"
+else
+  NEW_CONTAINER="$BLUE_CONTAINER"
+fi
+
+
+echo
+echo "Current container : ${CURRENT_CONTAINER:-none}"
+echo "New container     : $NEW_CONTAINER"
+
+
+#####################################################
+# Remove inactive container
+#####################################################
+
+log "Cleaning inactive deployment"
+
+docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+
+
+#####################################################
+# Start new container
+#####################################################
+
+log "Starting new production container"
+
+if ! docker run -d \
+  --name "$NEW_CONTAINER" \
+  --restart=unless-stopped \
+  --init \
+  --env-file "$ENV_FILE" \
+  --network "$NETWORK_NAME" \
+  "$IMAGE"; then
+
+  echo "❌ Failed to start new production container"
+
+  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  cleanup_image
+
+  exit 1
+fi
+
+
+#####################################################
+# Health check new container
+#####################################################
+
+if ! wait_for_http \
+  "$NEW_CONTAINER" \
+  "http://${NEW_CONTAINER}:4005/health" \
+  "New production application"; then
+
+  echo
+  echo "❌ New production deployment failed"
+
+  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  cleanup_image
+
+  echo "✅ Existing production container remains untouched"
+
+  exit 1
+fi
+
+
+#####################################################
+# Verify from Docker network
+#####################################################
+
+log "Running internal production smoke test"
+
+SMOKE_STATUS=$(docker run --rm \
+  --network "$NETWORK_NAME" \
+  curlimages/curl:8.10.1 \
   -s \
   -o /dev/null \
   -w "%{http_code}" \
   --max-time 10 \
-  "http://127.0.0.1:${APP_PORT}/health" || true)
+  "http://${NEW_CONTAINER}:4005/health" || true)
 
-if [[ "$HTTP_STATUS" != "200" ]]; then
+if [[ "$SMOKE_STATUS" != "200" ]]; then
 
-  echo "❌ Production smoke test failed"
+  echo "❌ Internal production smoke test failed"
 
-  docker logs --tail 200 "$APP_CONTAINER" || true
+  docker logs --tail 200 "$NEW_CONTAINER" || true
+  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  cleanup_image
 
-  rollback
+  echo "✅ Existing production container remains untouched"
 
   exit 1
-
 fi
+
+
+#####################################################
+# Switch Nginx traffic
+#####################################################
+
+log "Switching Nginx traffic"
+
+echo "upstream accounting_service_backend {" \
+  > /tmp/accounting-upstream.conf
+
+echo "    server ${NEW_CONTAINER}:4005;" \
+  >> /tmp/accounting-upstream.conf
+
+echo "}" \
+  >> /tmp/accounting-upstream.conf
+
+
+docker cp \
+  /tmp/accounting-upstream.conf \
+  "${NGINX_CONTAINER}:${NGINX_UPSTREAM_FILE}"
+
+
+#####################################################
+# Validate Nginx configuration
+#####################################################
+
+log "Validating Nginx configuration"
+
+if ! docker exec "$NGINX_CONTAINER" nginx -t; then
+
+  echo "❌ Nginx configuration validation failed"
+
+  echo "🔄 Keeping existing production container"
+
+  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  cleanup_image
+
+  exit 1
+fi
+
+
+#####################################################
+# Reload Nginx
+#####################################################
+
+log "Reloading Nginx"
+
+if ! docker exec "$NGINX_CONTAINER" nginx -s reload; then
+
+  echo "❌ Nginx reload failed"
+
+  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  cleanup_image
+
+  exit 1
+fi
+
+
+#####################################################
+# Verify traffic after switch
+#####################################################
+
+log "Verifying production traffic"
+
+TRAFFIC_OK=false
+
+for i in {1..10}; do
+
+  HTTP_STATUS=$(curl \
+    -s \
+    -o /dev/null \
+    -w "%{http_code}" \
+    --max-time 5 \
+    "http://127.0.0.1/health" || true)
+
+  echo "Gateway: HTTP $HTTP_STATUS"
+
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    TRAFFIC_OK=true
+    break
+  fi
+
+  sleep 2
+done
+
+
+#####################################################
+# Traffic rollback
+#####################################################
+
+if [[ "$TRAFFIC_OK" != "true" ]]; then
+
+  echo "❌ Production traffic verification failed"
+
+  if [[ -n "$CURRENT_CONTAINER" ]]; then
+
+    echo "🔄 Rolling traffic back to $CURRENT_CONTAINER"
+
+    echo "upstream accounting_service_backend {" \
+      > /tmp/accounting-upstream.conf
+
+    echo "    server ${CURRENT_CONTAINER}:4005;" \
+      >> /tmp/accounting-upstream.conf
+
+    echo "}" \
+      >> /tmp/accounting-upstream.conf
+
+    docker cp \
+      /tmp/accounting-upstream.conf \
+      "${NGINX_CONTAINER}:${NGINX_UPSTREAM_FILE}"
+
+    if docker exec "$NGINX_CONTAINER" nginx -t; then
+      docker exec "$NGINX_CONTAINER" nginx -s reload
+      echo "✅ Traffic rollback completed"
+    else
+      echo "🚨 CRITICAL: Nginx rollback configuration failed"
+    fi
+
+  fi
+
+  docker rm -f "$NEW_CONTAINER" 2>/dev/null || true
+  cleanup_image
+
+  exit 1
+fi
+
+
+#####################################################
+# Remove previous container
+#####################################################
+
+if [[ -n "$CURRENT_CONTAINER" ]]; then
+
+  log "Removing previous production container"
+
+  docker rm -f "$CURRENT_CONTAINER" 2>/dev/null || true
+
+else
+
+  echo "ℹ️ No previous production container"
+fi
+
+
+#####################################################
+# Cleanup dangling images
+#####################################################
+
+log "Cleaning dangling Docker images"
+
+docker image prune -f
 
 
 #####################################################
 # Final status
 #####################################################
 
-echo "📊 Production status..."
+echo
+echo "📊 Production containers:"
 
-docker compose \
-  --env-file "$ENV_FILE" \
-  -f "$COMPOSE_FILE" \
-  ps
-
-
-#####################################################
-# Cleanup
-#####################################################
-
-echo "🧹 Cleaning unused Docker images..."
-
-docker image prune -f
+docker ps \
+  --filter "name=accounting-service-" \
+  --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 
+echo
 echo "========================================="
-echo "✅ DEPLOYMENT SUCCESSFUL"
+echo "✅ ZERO-DOWNTIME DEPLOYMENT SUCCESSFUL"
+echo "========================================="
+echo "Active container : $NEW_CONTAINER"
+echo "Image            : $IMAGE"
 echo "========================================="
