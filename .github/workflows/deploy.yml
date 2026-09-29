@@ -52,7 +52,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.prod
+          file: docker/node/Dockerfile.prod
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
