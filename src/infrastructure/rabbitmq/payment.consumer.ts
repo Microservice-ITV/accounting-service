@@ -235,39 +235,13 @@ const processPaymentCompleted = async (message: ConsumeMessage): Promise<void> =
 };
 
 const ensureSharedExchange = async (activeChannel: Channel): Promise<void> => {
-  try {
-    await activeChannel.checkExchange(config.rabbitmqExchange);
-    console.log(`Using existing shared exchange ${config.rabbitmqExchange} on the configured broker; no redeclaration attempted.`);
-    return;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const isMissing = /404|NOT_FOUND|not found/i.test(message);
-
-    if (!isMissing) {
-      throw error;
-    }
-
-    await activeChannel.assertExchange(config.rabbitmqExchange, 'topic', { durable: true });
-    console.log(`Created missing shared exchange ${config.rabbitmqExchange}.`);
-  }
+  await activeChannel.assertExchange(config.rabbitmqExchange, 'topic', { durable: true });
+  console.log(`RabbitMQ exchange ${config.rabbitmqExchange} is ready.`);
 };
 
 const ensureQueue = async (activeChannel: Channel, queueName: string, options: object): Promise<void> => {
-  try {
-    await activeChannel.checkQueue(queueName);
-    console.log(`Using existing queue ${queueName} on the configured broker; no redeclaration attempted.`);
-    return;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const isMissing = /404|NOT_FOUND|not found/i.test(message);
-
-    if (!isMissing) {
-      throw error;
-    }
-
-    await activeChannel.assertQueue(queueName, options);
-    console.log(`Created missing queue ${queueName}.`);
-  }
+  await activeChannel.assertQueue(queueName, options);
+  console.log(`RabbitMQ queue ${queueName} is ready.`);
 };
 
 const consumeMessages = async (activeChannel: Channel): Promise<void> => {
