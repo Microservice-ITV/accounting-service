@@ -9,14 +9,17 @@ concurrency:
   group: accounting-production
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/accounting-service
 
 jobs:
 
-  #####################################################
+  # ==========================================================
   # BUILD & TEST
-  #####################################################
+  # ==========================================================
 
   build:
     name: 🐳 Build & Push
@@ -36,7 +39,7 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
-      - name: 🔍 TypeScript validation
+      - name: 🔍 Lint
         run: npm run lint
 
       - name: 🧪 Run tests
@@ -56,12 +59,13 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
 
-  #####################################################
+  # ==========================================================
   # STAGING
-  #####################################################
+  # ==========================================================
 
   staging:
     name: 🧪 Staging Validation
@@ -80,6 +84,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
+          fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
           source: "docker-compose.prod.yml,scripts/deploy.sh"
           target: "/var/www/html/microservices/accounting-service/"
 
@@ -90,10 +95,11 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
+          fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
           command_timeout: 10m
 
           script: |
-            set -e
+            set -euo pipefail
 
             cd /var/www/html/microservices/accounting-service
 
@@ -109,9 +115,9 @@ jobs:
               "${{ env.IMAGE_NAME }}:${{ github.sha }}"
 
 
-  #####################################################
+  # ==========================================================
   # PRODUCTION
-  #####################################################
+  # ==========================================================
 
   production:
     name: 🚀 Production Deployment
@@ -133,6 +139,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
+          fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
           source: "docker-compose.prod.yml,scripts/deploy.sh"
           target: "/var/www/html/microservices/accounting-service/"
 
@@ -143,10 +150,11 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
+          fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
           command_timeout: 15m
 
           script: |
-            set -e
+            set -euo pipefail
 
             cd /var/www/html/microservices/accounting-service
 
