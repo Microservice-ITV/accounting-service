@@ -16,9 +16,9 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
-    "prisma:seed": "tsx src/scripts/seed-accounts.ts",
-    "seed": "tsx src/scripts/seed-accounts.ts",
-    "seed:accounts": "tsx src/scripts/seed-accounts.ts"
+    "prisma:seed": "tsx src/scripts/run-seed.ts",
+    "seed": "tsx src/scripts/run-seed.ts",
+    "seed:accounts": "tsx src/scripts/run-seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

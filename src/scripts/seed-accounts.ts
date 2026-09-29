@@ -2,7 +2,11 @@ import prisma from '../lib/prisma.js';
 
 type AccountType = 'ASSET' | 'LIABILITY' | 'EQUITY' | 'INCOME' | 'EXPENSE';
 
-const defaultAccounts: Array<{ code: string; name: string; type: AccountType }> = [
+const defaultAccounts: Array<{
+  code: string;
+  name: string;
+  type: AccountType;
+}> = [
   { code: '1000', name: 'Cash', type: 'ASSET' },
   { code: '1100', name: 'Accounts Receivable', type: 'ASSET' },
   { code: '2000', name: 'Accounts Payable', type: 'LIABILITY' },
@@ -25,6 +29,7 @@ const defaultExpenseCategories = [
 
 export function shouldSeedRequiredMasterData() {
   const envValue = process.env.ACCOUNTING_ENABLE_SEED;
+
   if (envValue !== undefined) {
     return envValue === 'true';
   }
@@ -32,7 +37,11 @@ export function shouldSeedRequiredMasterData() {
   return process.env.NODE_ENV !== 'production';
 }
 
-async function ensureAccount(account: { code: string; name: string; type: AccountType }) {
+async function ensureAccount(account: {
+  code: string;
+  name: string;
+  type: AccountType;
+}) {
   return prisma.account.upsert({
     where: { code: account.code },
     update: {
@@ -66,9 +75,11 @@ async function ensureExpenseCategory(category: {
   });
 }
 
-async function seedRequiredMasterData() {
+export async function seedRequiredMasterData() {
   if (!shouldSeedRequiredMasterData()) {
-    console.log('Accounting seed is disabled; skipping required master-data setup.');
+    console.log(
+      'Accounting seed is disabled; skipping required master-data setup.',
+    );
     return;
   }
 
@@ -80,15 +91,7 @@ async function seedRequiredMasterData() {
     await ensureExpenseCategory(category);
   }
 
-  console.log('Accounting seed complete: only required master/reference data was ensured.');
+  console.log(
+    'Accounting seed complete: only required master/reference data was ensured.',
+  );
 }
-
-seedRequiredMasterData()
-  .then(async () => {
-    await prisma.$disconnect();
-  })
-  .catch(async (error) => {
-    console.error('Accounting seed failed:', error);
-    await prisma.$disconnect();
-    process.exit(1);
-  });
