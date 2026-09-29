@@ -34,7 +34,7 @@ NETWORK_NAME="itv-network"
 NGINX_CONTAINER="microservices-gateway"
 NGINX_UPSTREAM_FILE="$GATEWAY_NGINX_DIR/accounting-service-upstream.conf"
 STAGING_PROJECT="accounting-staging"
-PRODUCTION_PROJECT="accounting-production"
+PRODUCTION_PROJECT="accounting-service-prod"
 LOCK_FILE="/tmp/accounting-service-deploy.lock"
 
 # ============================================================
