@@ -17,9 +17,10 @@ services:
       ACCOUNTING_ENABLE_SEED: "true"
       AUTH_SERVICE_BASE_URL: http://authservice-nginx/api/v1
       DATABASE_URL: postgresql://postgres:postgres@accounting-db:5432/accounting_service?schema=public
-      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672}
+      RABBITMQ_URL: ${PAYMENT_RABBITMQ_URL:-amqp://guest:guest@orderservice-rabbitmq:5672}
       RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-order_events}
       RABBITMQ_PAYMENT_COMPLETED_KEY: ${RABBITMQ_PAYMENT_COMPLETED_KEY:-payment.completed}
+      RABBITMQ_PAYMENT_COLLECTED_KEY: ${RABBITMQ_PAYMENT_COLLECTED_KEY:-payment.collected}
       RABBITMQ_PAYMENT_QUEUE: ${RABBITMQ_PAYMENT_QUEUE:-accounting.payment_completed}
       RABBITMQ_PAYMENT_DLQ: ${RABBITMQ_PAYMENT_DLQ:-accounting.payment_completed.dlq}
     depends_on:

@@ -1,7 +1,7 @@
 import { Channel, ChannelModel, ConsumeMessage, connect } from 'amqplib';
 import { z } from 'zod';
 import prisma from '../../lib/prisma.js';
-import { createJournalEntry } from '../../modules/entries/entry.service.js';
+import { createJournalEntry, createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
 import { config } from '../../config/index.js';
 
 const shopBreakdownLineSchema = z.object({
@@ -20,6 +20,7 @@ const paymentCompletedSchema = z.object({
     checkout_id: z.string().min(1).optional(),
     amount: z.number().finite().positive(),
     currency: z.string().min(1).optional(),
+    payment_method: z.string().min(1).optional(),
     status: z.enum(['SUCCESS', 'COMPLETED', 'succeeded', 'completed']).optional(),
     shop_id: z.string().min(1).optional(),
     seller_id: z.string().min(1).optional(),
@@ -27,7 +28,26 @@ const paymentCompletedSchema = z.object({
   }).passthrough(),
 });
 
+const paymentCollectedSchema = z.object({
+  event_id: z.string().min(1),
+  event: z.literal('payment.collected'),
+  data: z.object({
+    payment_id: z.string().min(1),
+    order_id: z.string().min(1).optional(),
+    checkout_id: z.string().min(1).optional(),
+    amount: z.number().finite().positive(),
+    currency: z.string().min(1).optional(),
+    payment_method: z.string().min(1).optional(),
+    shop_breakdown: z.array(z.object({
+      shop_id: z.string().min(1),
+      gross_amount: z.number().finite().nonnegative(),
+    }).passthrough()).min(1),
+  }).passthrough(),
+});
+
 type PaymentCompletedEvent = z.infer<typeof paymentCompletedSchema>;
+type PaymentCollectedEvent = z.infer<typeof paymentCollectedSchema>;
+type PaymentEvent = PaymentCompletedEvent | PaymentCollectedEvent;
 
 export type PaymentJournalContext = {
   payment_id: string;
@@ -48,6 +68,21 @@ export type PaymentJournalContext = {
 export function normalizePaymentCompletedEvent(raw: unknown): PaymentCompletedEvent {
   const payload = paymentCompletedSchema.parse(raw);
   return payload;
+}
+
+export function normalizePaymentCollectedEvent(raw: unknown): PaymentCollectedEvent {
+  return paymentCollectedSchema.parse(raw);
+}
+
+export function normalizePaymentEvent(raw: unknown): PaymentEvent {
+  const event = z.object({ event: z.string() }).passthrough().parse(raw);
+  return event.event === 'payment.collected'
+    ? normalizePaymentCollectedEvent(raw)
+    : normalizePaymentCompletedEvent(raw);
+}
+
+export function shouldRecognizeCompletedPayment(event: PaymentCompletedEvent): boolean {
+  return event.data.payment_method?.toLowerCase() !== 'cod';
 }
 
 export function buildPaymentJournalLines(context: PaymentJournalContext) {
@@ -74,6 +109,48 @@ export function buildPaymentJournalLines(context: PaymentJournalContext) {
       amount: context.amount,
       memo: `Revenue recognized${currencyLabel}${detailSuffix}`,
     },
+  ];
+}
+
+export function buildCollectedPaymentJournalLines(context: PaymentJournalContext) {
+  const allocations = (context.shop_breakdown ?? []).map((row) => ({
+    shopId: row.shop_id,
+    amountCents: Math.round(Number(row.gross_amount ?? 0) * 100),
+  }));
+
+  if (allocations.length === 0 || allocations.some((row) => !row.shopId)) {
+    throw new Error('COD payment requires shop allocations');
+  }
+
+  const allocatedCents = allocations.reduce((sum, row) => sum + row.amountCents, 0);
+  if (allocatedCents !== Math.round(context.amount * 100)) {
+    throw new Error('COD payment allocation total does not match payment amount');
+  }
+
+  const currencyLabel = context.currency ? ` (${context.currency})` : '';
+  const orderPart = context.order_id ? `order=${context.order_id}, ` : '';
+  const creditLines = allocations
+    .filter((row) => row.amountCents > 0)
+    .map((row) => ({
+      accountCode: '4000',
+      direction: 'CREDIT' as const,
+      amount: row.amountCents / 100,
+      memo: `Revenue recognized${currencyLabel} (${orderPart}shop=${row.shopId})`,
+    }));
+
+  if (creditLines.length === 0) {
+    throw new Error('COD payment requires positive shop allocations');
+  }
+
+  const collectedAmount = creditLines.reduce((sum, line) => sum + line.amount, 0);
+  return [
+    {
+      accountCode: '1000',
+      direction: 'DEBIT' as const,
+      amount: collectedAmount,
+      memo: `COD cash collected${currencyLabel}${context.order_id ? ` (order=${context.order_id})` : ''}`,
+    },
+    ...creditLines,
   ];
 }
 
@@ -138,7 +215,11 @@ const isPermanentError = (error: unknown): boolean => {
   }
 
   const message = error instanceof Error ? error.message : '';
-  return message.startsWith('Unknown account codes:') || message.startsWith('Journal entry is out of balance:');
+  return message.startsWith('Unknown account codes:')
+    || message.startsWith('Journal entry is out of balance:')
+    || message.startsWith('COD payment requires shop allocations')
+    || message.startsWith('COD payment allocation total does not match payment amount')
+    || message.startsWith('COD payment requires positive shop allocations');
 };
 
 const isDuplicateEvent = (error: unknown): boolean => {
@@ -157,13 +238,17 @@ const scheduleReconnect = () => {
   }, 5000);
 };
 
-const parseMessage = (message: ConsumeMessage): PaymentCompletedEvent => {
+const parseMessage = (message: ConsumeMessage): PaymentEvent => {
   const payload: unknown = JSON.parse(message.content.toString('utf8'));
-  return normalizePaymentCompletedEvent(payload);
+  return normalizePaymentEvent(payload);
 };
 
-const processPaymentCompleted = async (message: ConsumeMessage): Promise<void> => {
-  const event = parseMessage(message);
+const processPaymentCompleted = async (event: PaymentCompletedEvent): Promise<void> => {
+  if (!shouldRecognizeCompletedPayment(event)) {
+    console.log(`COD payment completion deferred until collection: ${event.data.payment_id}`);
+    return;
+  }
+
   const existingEntry = await prisma.journalEntry.findUnique({
     where: { eventId: event.event_id },
   });
@@ -234,14 +319,67 @@ const processPaymentCompleted = async (message: ConsumeMessage): Promise<void> =
   console.log(`payment.completed accounted: ${event.data.payment_id}`);
 };
 
+const processPaymentCollected = async (event: PaymentCollectedEvent): Promise<void> => {
+  const existingEvent = await prisma.journalEntry.findUnique({
+    where: { eventId: event.event_id },
+  });
+  if (existingEvent) {
+    console.log(`payment.collected already processed: ${event.event_id}`);
+    return;
+  }
+
+  const paymentContext: PaymentJournalContext = {
+    payment_id: event.data.payment_id,
+    order_id: event.data.order_id,
+    checkout_id: event.data.checkout_id,
+    amount: event.data.amount,
+    currency: event.data.currency,
+    shop_breakdown: event.data.shop_breakdown,
+  };
+  const journalInput = {
+    referenceType: 'PAYMENT',
+    referenceId: event.data.payment_id,
+    eventId: event.event_id,
+    narration: event.data.order_id
+      ? `Collected COD payment for order ${event.data.order_id}`
+      : 'Collected COD payment',
+    lines: buildCollectedPaymentJournalLines(paymentContext),
+  };
+  const existingPaymentEntry = await prisma.journalEntry.findFirst({
+    where: {
+      referenceType: 'PAYMENT',
+      referenceId: event.data.payment_id,
+    },
+  });
+
+  if (existingPaymentEntry) {
+    await prisma.$transaction((tx) =>
+      createJournalEntryInTransaction(journalInput, tx, existingPaymentEntry.id),
+    );
+  } else {
+    await createJournalEntry(journalInput);
+  }
+
+  console.log(`payment.collected accounted: ${event.data.payment_id}`);
+};
+
+const processPaymentEvent = async (message: ConsumeMessage): Promise<void> => {
+  const event = parseMessage(message);
+  if (event.event === 'payment.collected') {
+    await processPaymentCollected(event);
+  } else {
+    await processPaymentCompleted(event);
+  }
+};
+
 const ensureSharedExchange = async (activeChannel: Channel): Promise<void> => {
   await activeChannel.assertExchange(config.rabbitmqExchange, 'topic', { durable: true });
-  console.log(`RabbitMQ exchange ${config.rabbitmqExchange} is ready.`);
+  console.log(`Ensured shared exchange ${config.rabbitmqExchange} on the configured broker.`);
 };
 
 const ensureQueue = async (activeChannel: Channel, queueName: string, options: object): Promise<void> => {
   await activeChannel.assertQueue(queueName, options);
-  console.log(`RabbitMQ queue ${queueName} is ready.`);
+  console.log(`Ensured queue ${queueName} on the configured broker.`);
 };
 
 const consumeMessages = async (activeChannel: Channel): Promise<void> => {
@@ -252,16 +390,16 @@ const consumeMessages = async (activeChannel: Channel): Promise<void> => {
     }
 
     try {
-      await processPaymentCompleted(message);
+      await processPaymentEvent(message);
       activeChannel.ack(message);
     } catch (error) {
       if (isDuplicateEvent(error)) {
         activeChannel.ack(message);
-        console.log('Duplicate payment.completed ignored');
+        console.log('Duplicate payment event ignored');
         return;
       }
 
-      console.error('Failed to process payment.completed', error);
+      console.error('Failed to process payment event', error);
       activeChannel.nack(message, false, !isPermanentError(error));
     }
   });
@@ -291,6 +429,11 @@ const connectConsumer = async (): Promise<void> => {
       config.rabbitmqExchange,
       config.rabbitmqPaymentCompletedKey,
     );
+    await nextChannel.bindQueue(
+      config.rabbitmqPaymentQueue,
+      config.rabbitmqExchange,
+      config.rabbitmqPaymentCollectedKey,
+    );
 
     connection = nextConnection;
     channel = nextChannel;
@@ -302,7 +445,7 @@ const connectConsumer = async (): Promise<void> => {
     });
 
     await consumeMessages(nextChannel);
-    console.log(`Accounting consumer listening for ${config.rabbitmqPaymentCompletedKey}`);
+    console.log(`Accounting consumer listening for ${config.rabbitmqPaymentCompletedKey} and ${config.rabbitmqPaymentCollectedKey}`);
   } catch (error) {
     console.error('Accounting RabbitMQ connection failed; retrying in 5 seconds', error);
     if (nextChannel) {

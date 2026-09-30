@@ -33,14 +33,14 @@ curl http://localhost:4005/health
 
 ## Payment accounting integration
 
-The accounting consumer listens for the payment service's existing `payment.completed` event on the `order_events` exchange. For local Docker testing, point `PAYMENT_RABBITMQ_URL` at the same RabbitMQ broker configured in `payment-service/.env` before starting the accounting service:
+The accounting consumer listens for `payment.completed` and `payment.collected` from the payment service on the existing `order_events` exchange. COD revenue is recognized only from `payment.collected`, using the payment service's existing per-shop allocations. For local Docker testing, point `PAYMENT_RABBITMQ_URL` at the same RabbitMQ broker configured in `payment-service/.env` before starting the accounting service:
 
 ```powershell
-$env:PAYMENT_RABBITMQ_URL = (Get-Content ..\payment-service\.env | Where-Object { $_ -match '^RABBITMQ_URL=' }).Split('=', 2)[1]
+$env:PAYMENT_RABBITMQ_URL = (Get-Content ..\payment-service\.env | Where-Object { $_ -match '^RABBITMQ_URL=' }).Split('=', 2)[1] -replace '@rabbitmq(?=:)', '@orderservice-rabbitmq'
 docker compose up -d --build
 ```
 
-The consumer uses the durable queue `accounting.payment_completed`, binds it to `payment.completed`, and sends malformed or permanently invalid messages to `accounting.payment_completed.dlq`. Successful events create a balanced entry with Cash (`1000`) debited and Revenue (`4000`) credited. The event ID is unique in `JournalEntry`, so duplicate deliveries are acknowledged without creating duplicate entries.
+The consumer uses the durable queue `accounting.payment_completed`, binds it to both payment routing keys, and sends malformed or permanently invalid messages to `accounting.payment_completed.dlq`. Successful events create balanced entries with Cash (`1000`) debited and Revenue (`4000`) credited. COD collection credits Revenue separately for each allocated shop. The event ID and payment reference prevent duplicate journal entries.
 
 To verify an entry after publishing a successful payment event:
 

@@ -54,6 +54,7 @@ type EntryDbClient = typeof prisma | Prisma.TransactionClient;
 export async function createJournalEntryInTransaction(
   input: CreateJournalEntryInput,
   db: EntryDbClient,
+  replaceJournalEntryId?: string,
 ) {
   validateLines(input.lines);
 
@@ -70,16 +71,30 @@ export async function createJournalEntryInTransaction(
     throw new Error(`Unknown account codes: ${missingCodes.join(', ')}`);
   }
 
-  const journalEntry = await db.journalEntry.create({
-    data: {
-      referenceType: input.referenceType,
-      referenceId: input.referenceId,
-      eventId: input.eventId,
-      narration: input.narration || 'Accounting entry',
-      entryDate: input.entryDate ? new Date(input.entryDate) : new Date(),
-      status: 'POSTED',
-    },
-  });
+  const journalEntry = replaceJournalEntryId
+    ? await db.journalEntry.update({
+        where: { id: replaceJournalEntryId },
+        data: {
+          eventId: input.eventId,
+          narration: input.narration || 'Accounting entry',
+          entryDate: input.entryDate ? new Date(input.entryDate) : new Date(),
+          status: 'POSTED',
+        },
+      })
+    : await db.journalEntry.create({
+        data: {
+          referenceType: input.referenceType,
+          referenceId: input.referenceId,
+          eventId: input.eventId,
+          narration: input.narration || 'Accounting entry',
+          entryDate: input.entryDate ? new Date(input.entryDate) : new Date(),
+          status: 'POSTED',
+        },
+      });
+
+  if (replaceJournalEntryId) {
+    await db.entryLine.deleteMany({ where: { journalEntryId: replaceJournalEntryId } });
+  }
 
   await Promise.all(
     input.lines.map((line: EntryLineInput) =>
