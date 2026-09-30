@@ -10,34 +10,38 @@ export function resolveSellerShopScope(context?: {
   role?: string | null;
   activeShopId?: string | null;
   authorizedShopIds?: Iterable<string> | string[] | null;
-} | null) {
+} | null): string[] | null {
   if (!context) {
     return null;
   }
 
   const role = normalizeShopId(context.role).toLowerCase();
-  if (role.includes('admin') || role.includes('super')) {
+  const platformRoles = new Set([
+    'platform_super_admin',
+    'super_admin',
+    'platform_finance',
+    'platform_director',
+    'platform_cfo',
+    'cfo',
+  ]);
+  if (platformRoles.has(role)) {
     return null;
   }
 
+  const shopIds = new Set(Array.from(context.authorizedShopIds ?? [])
+    .map((shopId) => normalizeShopId(shopId))
+    .filter(Boolean));
+
   const activeShopId = normalizeShopId(context.activeShopId);
   if (activeShopId) {
-    return activeShopId;
+    shopIds.add(activeShopId);
   }
 
-  const authorizedShopIds = Array.from(context.authorizedShopIds ?? [])
-    .map((shopId) => normalizeShopId(shopId))
-    .filter(Boolean);
-
-  if (authorizedShopIds.length === 1) {
-    return authorizedShopIds[0];
-  }
-
-  if (authorizedShopIds.length === 0) {
+  if (shopIds.size === 0) {
     throw new Error('Seller must be assigned to a shop before accessing income reports');
   }
 
-  throw new Error('Seller income reports require a single active shop; multiple shops are not allowed');
+  return Array.from(shopIds);
 }
 
 router.get('/reports/profit-loss', async (req, res) => {
@@ -55,7 +59,7 @@ router.get('/reports/profit-loss', async (req, res) => {
       authContext = null;
     }
 
-    const scopedShopId = authContext ? resolveSellerShopScope(authContext) : null;
+    const scopedShopIds = authContext ? resolveSellerShopScope(authContext) : null;
 
     const where: Record<string, unknown> = {
       journalEntry: {
@@ -69,14 +73,14 @@ router.get('/reports/profit-loss', async (req, res) => {
       },
     };
 
-    if (scopedShopId) {
+    if (scopedShopIds) {
       Object.assign(where, {
-        OR: [
-          { memo: { contains: `shop=${scopedShopId}`, mode: 'insensitive' } },
-          { memo: { contains: `shop_id=${scopedShopId}`, mode: 'insensitive' } },
-          { journalEntry: { narration: { contains: `shop=${scopedShopId}`, mode: 'insensitive' } } },
-          { journalEntry: { narration: { contains: `shop_id=${scopedShopId}`, mode: 'insensitive' } } },
-        ],
+        OR: scopedShopIds.flatMap((shopId) => [
+          { memo: { contains: `shop=${shopId}`, mode: 'insensitive' } },
+          { memo: { contains: `shop_id=${shopId}`, mode: 'insensitive' } },
+          { journalEntry: { narration: { contains: `shop=${shopId}`, mode: 'insensitive' } } },
+          { journalEntry: { narration: { contains: `shop_id=${shopId}`, mode: 'insensitive' } } },
+        ]),
       });
     }
 
