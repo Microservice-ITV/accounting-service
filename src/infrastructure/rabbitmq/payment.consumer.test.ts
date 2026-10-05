@@ -3,11 +3,15 @@ import assert from 'node:assert/strict';
 
 import {
   buildCollectedPaymentJournalLines,
+  buildMerchandisePaymentJournalLines,
   buildPaymentJournalLines,
   buildSellerSettlementJournalLines,
+  buildPnlOrderShopProjections,
+  normalizeOrderPaidEvent,
   normalizePaymentCollectedEvent,
   normalizePaymentCompletedEvent,
   shouldRecognizeCompletedPayment,
+  shouldRecognizePaymentEvent,
 } from './payment.consumer.js';
 
 test('normalizePaymentCompletedEvent accepts shop and order metadata in payment.completed', () => {
@@ -46,6 +50,91 @@ test('COD payment.completed is deferred until physical collection', () => {
   });
 
   assert.equal(shouldRecognizeCompletedPayment(event), false);
+});
+
+test('non-COD payment.completed is recognized as actual income', () => {
+  const event = normalizePaymentCompletedEvent({
+    event_id: 'evt-card-completed',
+    event: 'payment.completed',
+    data: {
+      payment_id: 'pay-card',
+      amount: 100,
+      payment_method: 'card',
+    },
+  });
+
+  assert.equal(shouldRecognizeCompletedPayment(event), true);
+});
+
+test('COD payment.collected is recognized after collection', () => {
+  const event = normalizePaymentCollectedEvent({
+    event_id: 'evt-cod-collected',
+    event: 'payment.collected',
+    data: {
+      payment_id: 'pay-cod-collected',
+      amount: 100,
+      payment_method: 'COD',
+      shop_breakdown: [{ shop_id: 'shop-a', gross_amount: 100 }],
+    },
+  });
+
+  assert.equal(shouldRecognizePaymentEvent(event), true);
+});
+
+test('order.paid projection persists shop-level item sales and distinguishes funding and discount types', () => {
+  const event = normalizeOrderPaidEvent({
+    event_id: 'evt-order-paid',
+    event: 'order.paid',
+    timestamp: '2026-06-15T12:00:00.000Z',
+    data: {
+      order_id: 'order-pnl',
+      payment_id: 'pay-pnl',
+      currency: 'MMK',
+      shop_breakdown: [
+        {
+          shop_id: 'shop-a',
+          shop_order_id: 'shop-order-a',
+          subtotal: 100,
+          discount_total: 20,
+          shipping_total: 10,
+          grand_total: 90,
+        },
+        {
+          shop_id: 'shop-b',
+          shop_order_id: 'shop-order-b',
+          subtotal: 50,
+          discount_total: 0,
+          shipping_total: 5,
+          grand_total: 55,
+        },
+      ],
+      promotion_allocations: [
+        { shop_id: 'shop-a', discount_type: 'ITEM', funded_by: 'SELLER', amount: 10 },
+        { shop_id: 'shop-a', discount_type: 'ITEM', funded_by: 'PLATFORM', amount: 5 },
+        { shop_id: 'shop-a', discount_type: 'SHIPPING', funded_by: 'SELLER', amount: 3 },
+        { shop_id: 'shop-a', discount_type: 'SHIPPING', funded_by: 'PLATFORM', amount: 2 },
+      ],
+    },
+  });
+  const projections = buildPnlOrderShopProjections(event);
+
+  assert.equal(projections.length, 2);
+  assert.equal(projections[0].shopId, 'shop-a');
+  assert.equal(projections[0].grossItemSales, 100);
+  assert.equal(projections[0].paidAmount, 90);
+  assert.equal(projections[0].discountAllocationsComplete, true);
+  assert.deepEqual(
+    projections[0].discounts.map(({ discountType, fundedBy }) => [discountType, fundedBy]),
+    [
+      ['ITEM', 'SELLER'],
+      ['ITEM', 'PLATFORM'],
+      ['SHIPPING', 'SELLER'],
+      ['SHIPPING', 'PLATFORM'],
+    ],
+  );
+  assert.equal(projections[1].shopId, 'shop-b');
+  assert.equal(projections[1].grossItemSales, 50);
+  assert.equal(projections[1].discountAllocationsComplete, true);
 });
 
 test('buildPaymentJournalLines keeps cash/revenue accounting while including shop context in memo', () => {
@@ -110,17 +199,17 @@ test('collected COD journal lines allocate revenue per shop and balance cash', (
     order_id: 'order-505',
     amount: 100000,
     currency: 'MMK',
-    shop_breakdown: [
-      { shop_id: 'shop-a', gross_amount: 60000 },
-      { shop_id: 'shop-b', gross_amount: 40000 },
-    ],
-  });
+  }, [
+    { shop_id: 'shop-a', gross_amount: 60000, shipping_total: 12000 },
+    { shop_id: 'shop-b', gross_amount: 40000, shipping_total: 8000 },
+  ]);
 
-  assert.equal(lines.length, 3);
+  assert.equal(lines.length, 5);
   assert.equal(lines[0].accountCode, '1000');
   assert.equal(lines[0].direction, 'DEBIT');
   assert.equal(lines[0].amount, 100000);
-  assert.deepEqual(lines.slice(1).map((line) => line.amount), [60000, 40000]);
+  assert.deepEqual(lines.filter((line) => line.accountCode === '4000').map((line) => line.amount), [48000, 32000]);
+  assert.deepEqual(lines.filter((line) => line.accountCode === '2000').map((line) => line.amount), [12000, 8000]);
   assert.match(lines[1].memo ?? '', /shop=shop-a/);
   assert.match(lines[2].memo ?? '', /shop=shop-b/);
   assert.equal(
@@ -129,17 +218,50 @@ test('collected COD journal lines allocate revenue per shop and balance cash', (
   );
 });
 
+test('COD and online order journals recognize merchandise only and retain shipping as payable', () => {
+  const context = {
+    payment_id: 'pay-cod-shipping',
+    order_id: 'order-shipping',
+    amount: 7075.88,
+    currency: 'MMK',
+  };
+  const allocations = [{
+    shop_id: 'shop-a',
+    gross_amount: 7075.88,
+    shipping_total: 1575.88,
+  }];
+
+  for (const lines of [
+    buildCollectedPaymentJournalLines(context, allocations),
+    buildMerchandisePaymentJournalLines(context, allocations, 'Payment received'),
+  ]) {
+    assert.equal(lines[0].accountCode, '1000');
+    assert.equal(lines[0].amount, 7075.88);
+    assert.deepEqual(
+      lines.filter((line) => line.accountCode === '4000').map((line) => line.amount),
+      [5500],
+    );
+    assert.deepEqual(
+      lines.filter((line) => line.accountCode === '2000').map((line) => line.amount),
+      [1575.88],
+    );
+    assert.equal(
+      lines.filter((line) => line.direction === 'DEBIT').reduce((sum, line) => sum + line.amount, 0),
+      lines.filter((line) => line.direction === 'CREDIT').reduce((sum, line) => sum + line.amount, 0),
+    );
+  }
+});
+
 test('collected COD journal rejects missing or mismatched allocations', () => {
   assert.throws(
-    () => buildCollectedPaymentJournalLines({ payment_id: 'pay-3', amount: 100, shop_breakdown: [] }),
+    () => buildCollectedPaymentJournalLines({ payment_id: 'pay-3', amount: 100 }, []),
     /requires shop allocations/,
   );
   assert.throws(
     () => buildCollectedPaymentJournalLines({
       payment_id: 'pay-4',
       amount: 100,
-      shop_breakdown: [{ shop_id: 'shop-a', gross_amount: 90 }],
-    }),
+    }, [{ shop_id: 'shop-a', gross_amount: 90, shipping_total: 0 }]),
     /does not match payment amount/,
   );
 });
