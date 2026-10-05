@@ -244,7 +244,7 @@ test('discount totals are unavailable when promotion allocations are incomplete'
   assert.ok(response.reports[0].missingComponents.includes('discountAllocations'));
 });
 
-test('shop scope attributes sales and recognized payment revenue only to the selected shop', () => {
+test('shop scope attributes paid amount less shipping as recognized revenue only to the selected shop', () => {
   const response = buildProfitLossResponse(query, {
     ...emptyData(),
     salesProjections: [
@@ -264,7 +264,7 @@ test('shop scope attributes sales and recognized payment revenue only to the sel
     entries: [
       {
         direction: 'CREDIT',
-        amount: 55,
+        amount: 80,
         memo: 'Revenue recognized (order=order-a, shop=shop-1)',
         journalEntry: { referenceType: 'PAYMENT', referenceId: 'pay-a' },
         account: { type: 'INCOME' },
@@ -280,8 +280,8 @@ test('shop scope attributes sales and recognized payment revenue only to the sel
   });
 
   assert.equal(response.reports[0].revenue.grossSales, 100);
-  assert.equal(response.reports[0].actualRevenue, 90);
-  assert.equal(response.entries.find((entry) => entry.journalEntry.referenceId === 'pay-a')?.amount, 90);
+  assert.equal(response.reports[0].actualRevenue, 80);
+  assert.equal(response.entries.find((entry) => entry.journalEntry.referenceId === 'pay-a')?.amount, 80);
 });
 
 test('income API corrects an existing collected COD journal to merchandise sales', () => {

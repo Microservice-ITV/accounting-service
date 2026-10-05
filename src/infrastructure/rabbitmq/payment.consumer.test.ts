@@ -7,6 +7,7 @@ import {
   buildPaymentJournalLines,
   buildSellerSettlementJournalLines,
   buildPnlOrderShopProjections,
+  buildOrderDeliveryExpenses,
   normalizeOrderPaidEvent,
   normalizePaymentCollectedEvent,
   normalizePaymentCompletedEvent,
@@ -135,6 +136,33 @@ test('order.paid projection persists shop-level item sales and distinguishes fun
   assert.equal(projections[1].shopId, 'shop-b');
   assert.equal(projections[1].grossItemSales, 50);
   assert.equal(projections[1].discountAllocationsComplete, true);
+});
+
+test('order.paid creates one fixed MMK Deli expense reference per shop order', () => {
+  const event = normalizeOrderPaidEvent({
+    event_id: 'evt-delivery-expense',
+    event: 'order.paid',
+    timestamp: '2026-10-05T10:00:00.000Z',
+    data: {
+      order_id: 'order-delivery',
+      currency: 'MMK',
+      shop_breakdown: [
+        { shop_id: 'shop-a', shop_order_id: 'shop-order-a', subtotal: 1000, grand_total: 1000 },
+        { shop_id: 'shop-b', shop_order_id: 'shop-order-b', subtotal: 2000, grand_total: 2000 },
+      ],
+    },
+  });
+  const expenses = buildOrderDeliveryExpenses(event);
+
+  assert.equal(expenses.length, 2);
+  assert.deepEqual(
+    expenses.map(({ expenseNo, shopId, amount, currency }) => ({ expenseNo, shopId, amount, currency })),
+    [
+      { expenseNo: 'DELI-shop-order-a', shopId: 'shop-a', amount: 300, currency: 'MMK' },
+      { expenseNo: 'DELI-shop-order-b', shopId: 'shop-b', amount: 300, currency: 'MMK' },
+    ],
+  );
+  assert.equal(expenses[0].expenseDate.toISOString(), '2026-10-05T10:00:00.000Z');
 });
 
 test('buildPaymentJournalLines keeps cash/revenue accounting while including shop context in memo', () => {

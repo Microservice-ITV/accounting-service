@@ -17,6 +17,7 @@ const defaultAccounts: Array<{
 ];
 
 const defaultExpenseCategories = [
+  { code: 'DELI', name: 'Deli', description: 'Delivery charge per shop order' },
   { code: 'OFFICE', name: 'Office', description: 'General office expenses' },
   { code: 'TRAVEL', name: 'Travel', description: 'Travel and transportation expenses' },
   { code: 'PURCHASE', name: 'Purchase', description: 'Business purchases and procurement' },

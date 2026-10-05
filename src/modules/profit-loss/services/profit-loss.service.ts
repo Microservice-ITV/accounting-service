@@ -105,15 +105,12 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
   const shopIsInScope = (shopId: string | null) =>
     Boolean(shopId) && (!query.scope.shopIds || query.scope.shopIds.includes(shopId!));
 
-  const merchandiseIncomeByOrderAndShop = new Map<string, number>();
+  const recognizedRevenueByOrderAndShop = new Map<string, number>();
   for (const sale of data.salesProjections) {
-    const sellerItemDiscounts = sale.discounts
-      .filter((discount) => discount.discountType === 'ITEM' && discount.fundedBy === 'SELLER')
-      .reduce((sum, discount) => sum + numberOf(discount.amount), 0);
     const key = `${sale.orderId}\u0000${sale.shopId}`;
-    merchandiseIncomeByOrderAndShop.set(
+    recognizedRevenueByOrderAndShop.set(
       key,
-      Math.max(0, numberOf(sale.grossItemSales) - sellerItemDiscounts),
+      Math.max(0, numberOf(sale.paidAmount) - numberOf(sale.shippingTotal)),
     );
   }
 
@@ -138,8 +135,8 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
     const orderId = memoOrderMatch?.[1] ?? paymentOrderByReference.get(line.journalEntry.referenceId);
     if (!shopMatch || !orderId) return line;
 
-    const merchandiseIncome = merchandiseIncomeByOrderAndShop.get(`${orderId}\u0000${shopMatch[1]}`);
-    return merchandiseIncome === undefined ? line : { ...line, amount: merchandiseIncome };
+    const recognizedRevenue = recognizedRevenueByOrderAndShop.get(`${orderId}\u0000${shopMatch[1]}`);
+    return recognizedRevenue === undefined ? line : { ...line, amount: recognizedRevenue };
   });
 
   const incomeByPaymentAndShop = new Map<string, number>();
