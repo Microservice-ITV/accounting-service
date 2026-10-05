@@ -10,6 +10,7 @@ export const config = {
   rabbitmqExchange: process.env.RABBITMQ_EXCHANGE || 'order_events',
   rabbitmqPaymentCompletedKey: process.env.RABBITMQ_PAYMENT_COMPLETED_KEY || 'payment.completed',
   rabbitmqPaymentCollectedKey: process.env.RABBITMQ_PAYMENT_COLLECTED_KEY || 'payment.collected',
+  rabbitmqOrderPaidKey: process.env.RABBITMQ_ORDER_PAID_KEY || 'order.paid',
   rabbitmqPaymentQueue: process.env.RABBITMQ_PAYMENT_QUEUE || 'accounting.payment_completed',
   rabbitmqPaymentDlq: process.env.RABBITMQ_PAYMENT_DLQ || 'accounting.payment_completed.dlq',
   nodeEnv: process.env.NODE_ENV || 'development',

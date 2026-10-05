@@ -21,6 +21,7 @@ services:
       RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-order_events}
       RABBITMQ_PAYMENT_COMPLETED_KEY: ${RABBITMQ_PAYMENT_COMPLETED_KEY:-payment.completed}
       RABBITMQ_PAYMENT_COLLECTED_KEY: ${RABBITMQ_PAYMENT_COLLECTED_KEY:-payment.collected}
+      RABBITMQ_ORDER_PAID_KEY: ${RABBITMQ_ORDER_PAID_KEY:-order.paid}
       RABBITMQ_PAYMENT_QUEUE: ${RABBITMQ_PAYMENT_QUEUE:-accounting.payment_completed}
       RABBITMQ_PAYMENT_DLQ: ${RABBITMQ_PAYMENT_DLQ:-accounting.payment_completed.dlq}
     depends_on:

@@ -234,6 +234,43 @@ model PaymentSettlementLine {
   @@index([sellerId])
 }
 
+model PnlOrderShop {
+  id                        String                       @id @default(cuid())
+  orderId                   String
+  shopOrderId               String?
+  sourceEventId             String
+  shopId                    String
+  currency                  String                       @default("USD")
+  grossItemSales            Decimal                      @db.Decimal(10, 2)
+  discountTotal             Decimal                      @db.Decimal(10, 2)
+  shippingTotal             Decimal                      @db.Decimal(10, 2)
+  paidAmount                Decimal                      @db.Decimal(10, 2)
+  discountAllocationsComplete Boolean                    @default(false)
+  orderPaidAt               DateTime
+  createdAt                 DateTime                     @default(now())
+  updatedAt                 DateTime                     @updatedAt
+  discounts                 PnlOrderDiscountAllocation[]
+
+  @@unique([orderId, shopId])
+  @@index([shopId, orderPaidAt])
+  @@index([sourceEventId])
+}
+
+model PnlOrderDiscountAllocation {
+  id             String      @id @default(cuid())
+  pnlOrderShopId String
+  promotionId    String?
+  rewardId       String?
+  discountType   String
+  fundedBy       String
+  amount         Decimal     @db.Decimal(10, 2)
+  createdAt      DateTime    @default(now())
+
+  pnlOrderShop   PnlOrderShop @relation(fields: [pnlOrderShopId], references: [id], onDelete: Cascade)
+
+  @@index([pnlOrderShopId, discountType, fundedBy])
+}
+
 model JournalEntry {
   id            String      @id @default(cuid())
   referenceType String
