@@ -165,6 +165,24 @@ export function buildPnlOrderShopProjections(event: OrderPaidEvent, now = new Da
   });
 }
 
+export function buildOrderDeliveryExpenses(event: OrderPaidEvent, now = new Date()) {
+  const parsedOrderPaidAt = event.timestamp ? new Date(event.timestamp) : now;
+  const expenseDate = Number.isNaN(parsedOrderPaidAt.getTime()) ? now : parsedOrderPaidAt;
+
+  return event.data.shop_breakdown.map((shop) => {
+    const shopOrderId = shop.shop_order_id ?? `${event.data.order_id}-${shop.shop_id}`;
+    return {
+      expenseNo: `DELI-${shopOrderId}`,
+      shopId: shop.shop_id,
+      amount: 300,
+      currency: 'MMK',
+      expenseDate,
+      description: `Delivery charge for order ${event.data.order_id}`,
+      eventId: `${event.event_id}:deli:${shop.shop_id}`,
+    };
+  });
+}
+
 type SettlementAllocation = {
   shop_id?: string | null;
   seller_id?: string | null;
@@ -592,6 +610,71 @@ const processPaymentCompleted = async (event: PaymentCompletedEvent): Promise<vo
   console.log(`payment.completed accounted: ${event.data.payment_id}`);
 };
 
+const recordOrderDeliveryExpenses = async (event: OrderPaidEvent): Promise<void> => {
+  const expenses = buildOrderDeliveryExpenses(event);
+
+  await prisma.$transaction(async (tx) => {
+    const category = await tx.expenseCategory.upsert({
+      where: { code: 'DELI' },
+      update: { name: 'Deli', description: 'Delivery charge per shop order' },
+      create: {
+        code: 'DELI',
+        name: 'Deli',
+        description: 'Delivery charge per shop order',
+      },
+      select: { id: true },
+    });
+
+    for (const expense of expenses) {
+      await tx.expense.upsert({
+        where: { expenseNo: expense.expenseNo },
+        update: {},
+        create: {
+          expenseNo: expense.expenseNo,
+          scope: 'SHOP',
+          shopId: expense.shopId,
+          expenseTypeId: category.id,
+          expenseAccountCode: '5000',
+          fundingAccountCode: '1000',
+          amount: expense.amount,
+          currency: expense.currency,
+          description: expense.description,
+          expenseDate: expense.expenseDate,
+          status: 'APPROVED',
+        },
+      });
+
+      const existingEntry = await tx.journalEntry.findFirst({
+        where: { referenceType: 'EXPENSE', referenceId: expense.expenseNo },
+        select: { id: true },
+      });
+      if (existingEntry) continue;
+
+      await createJournalEntryInTransaction({
+        referenceType: 'EXPENSE',
+        referenceId: expense.expenseNo,
+        eventId: expense.eventId,
+        narration: `Deli - ${expense.description}`,
+        entryDate: expense.expenseDate,
+        lines: [
+          {
+            accountCode: '5000',
+            direction: 'DEBIT',
+            amount: expense.amount,
+            memo: 'Deli',
+          },
+          {
+            accountCode: '1000',
+            direction: 'CREDIT',
+            amount: expense.amount,
+            memo: 'Deli paid',
+          },
+        ],
+      }, tx);
+    }
+  });
+};
+
 const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
   const projections = buildPnlOrderShopProjections(event);
 
@@ -620,6 +703,7 @@ const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
     }
   });
 
+  await recordOrderDeliveryExpenses(event);
   await syncOrderPaidSettlement(event);
 
   if (!event.data.payment_id) return;
