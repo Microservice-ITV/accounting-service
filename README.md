@@ -50,6 +50,20 @@ Invoke-RestMethod http://localhost:4005/api/v1/entries/reference/PAYMENT/<paymen
 
 The RabbitMQ consumer acknowledges a message only after the journal transaction commits. Failed database operations are requeued; malformed or invalid events are dead-lettered.
 
+## Journal-entry CQRS projection
+
+PostgreSQL remains the accounting write model. Every journal-entry insert or replacement writes an `AccountingOutboxEvent` in the same Prisma transaction. The outbox publisher sends durable `accounting.journal-entry.upserted` events to the `accounting.events` topic exchange and marks them published only after RabbitMQ confirms delivery. At service startup it also queues one snapshot per existing entry, so the read model can be populated without manually copying database records.
+
+The `ecommerce-read-service` consumes those events into its MongoDB `accounting_journal_entry_reads` collection. The authenticated read endpoint is `GET /accounting/entries` on that service; accounting admin and seller journal screens read from this projection. The projection is eventually consistent with the PostgreSQL write model.
+
+Apply the included Prisma migration before deploying the updated accounting service:
+
+```bash
+npx prisma migrate deploy
+```
+
+The publisher uses `ACCOUNTING_EVENTS_EXCHANGE` (default `accounting.events`) and `ACCOUNTING_JOURNAL_ENTRY_ROUTING_KEY` (default `accounting.journal-entry.upserted`). Configure the ecommerce read service with the same exchange and the `ACCOUNTING_READ_QUEUE` and `ACCOUNTING_EVENT_ROUTING_KEYS` values from its environment example.
+
 ## Record an expense
 
 Create a balanced expense entry. The default accounts are Operating Expenses (`5000`) and Cash (`1000`):

@@ -1,0 +1,2 @@
+ALTER TABLE "PnlOrderShop"
+ALTER COLUMN "currency" SET DEFAULT 'MMK';
