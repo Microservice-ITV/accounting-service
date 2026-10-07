@@ -147,7 +147,7 @@ export function buildPnlOrderShopProjections(event: OrderPaidEvent, now = new Da
       shopOrderId: shop.shop_order_id ?? null,
       sourceEventId: event.event_id,
       shopId: shop.shop_id,
-      currency: event.data.currency ?? 'USD',
+      currency: event.data.currency ?? 'MMK',
       grossItemSales: shop.subtotal,
       discountTotal: shop.discount_total ?? 0,
       shippingTotal: shop.shipping_total ?? 0,
@@ -312,7 +312,7 @@ async function syncOrderPaidSettlement(event: OrderPaidEvent): Promise<void> {
         shopId: row.shop_id,
         grossAmount: row.gross_amount,
         payableAmount: row.net_payout,
-        currency: event.data.currency ?? 'USD',
+        currency: event.data.currency ?? 'MMK',
       })),
     });
   });

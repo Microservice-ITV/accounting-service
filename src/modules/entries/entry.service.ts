@@ -1,5 +1,7 @@
 import type { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import prisma from '../../lib/prisma.js';
+import { config } from '../../config/index.js';
 
 export type Direction = 'DEBIT' | 'CREDIT';
 
@@ -51,6 +53,57 @@ function validateLines(lines: EntryLineInput[]) {
 
 type EntryDbClient = typeof prisma | Prisma.TransactionClient;
 
+type JournalEntryProjection = Prisma.JournalEntryGetPayload<{
+  include: {
+    lines: {
+      include: {
+        account: {
+          select: {
+            id: true;
+            code: true;
+            name: true;
+            type: true;
+          };
+        };
+      };
+    };
+  };
+}>;
+
+export function buildJournalEntryUpsertEvent(
+  entry: JournalEntryProjection,
+  eventId: string = randomUUID(),
+) {
+  return {
+    eventId,
+    eventType: 'accounting.journal-entry.upserted',
+    routingKey: config.accountingJournalEntryRoutingKey,
+    payload: {
+      event_id: eventId,
+      event: 'accounting.journal-entry.upserted',
+      timestamp: new Date().toISOString(),
+      data: {
+        id: entry.id,
+        referenceType: entry.referenceType,
+        referenceId: entry.referenceId,
+        eventId: entry.eventId,
+        narration: entry.narration,
+        entryDate: entry.entryDate.toISOString(),
+        status: entry.status,
+        version: entry.version,
+        createdAt: entry.createdAt.toISOString(),
+        lines: entry.lines.map((line) => ({
+          id: line.id,
+          direction: line.direction,
+          amount: Number(line.amount),
+          memo: line.memo,
+          account: line.account,
+        })),
+      },
+    } satisfies Prisma.InputJsonValue,
+  };
+}
+
 export async function createJournalEntryInTransaction(
   input: CreateJournalEntryInput,
   db: EntryDbClient,
@@ -79,6 +132,7 @@ export async function createJournalEntryInTransaction(
           narration: input.narration || 'Accounting entry',
           entryDate: input.entryDate ? new Date(input.entryDate) : new Date(),
           status: 'POSTED',
+          version: { increment: 1 },
         },
       })
     : await db.journalEntry.create({
@@ -109,6 +163,37 @@ export async function createJournalEntryInTransaction(
       }),
     ),
   );
+
+  const projection = await db.journalEntry.findUnique({
+    where: { id: journalEntry.id },
+    include: {
+      lines: {
+        include: {
+          account: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              type: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!projection) {
+    throw new Error(`Journal entry ${journalEntry.id} was not found after writing`);
+  }
+
+  const event = buildJournalEntryUpsertEvent(projection);
+  await db.accountingOutboxEvent.create({
+    data: {
+      eventId: event.eventId,
+      eventType: event.eventType,
+      routingKey: event.routingKey,
+      payload: event.payload,
+    },
+  });
 
   return {
     id: journalEntry.id,

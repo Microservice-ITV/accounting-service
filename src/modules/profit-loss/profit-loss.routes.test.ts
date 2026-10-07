@@ -138,10 +138,53 @@ test('service filters journal entries to the authenticated shop scope', async ()
     },
     {
       direction: 'CREDIT',
+      amount: 12,
+      memo: 'Delivery fee payable (MMK) (order=ORDER-1, shop=shop-1)',
+      journalEntry: { referenceType: 'PAYMENT', referenceId: 'PAY-1' },
+      account: { type: 'LIABILITY', code: '2000' },
+    },
+    {
+      direction: 'CREDIT',
       amount: 925,
       memo: 'shop_id=shop-2',
       journalEntry: { referenceType: 'PAYMENT', referenceId: 'PAY-2' },
       account: { type: 'INCOME' },
+    },
+    {
+      direction: 'CREDIT',
+      amount: 20,
+      memo: 'Delivery fee payable (MMK) (order=ORDER-2, shop=shop-2)',
+      journalEntry: { referenceType: 'PAYMENT', referenceId: 'PAY-2' },
+      account: { type: 'LIABILITY', code: '2000' },
+    },
+    {
+      direction: 'CREDIT',
+      amount: 50,
+      memo: 'Other payable (shop=shop-1)',
+      journalEntry: { referenceType: 'PAYMENT', referenceId: 'PAY-1' },
+      account: { type: 'LIABILITY', code: '2000' },
+    },
+  ];
+  data.paymentLines = [
+    {
+      shopId: 'shop-1',
+      currency: 'MMK',
+      grossAmount: 87,
+      settlement: {
+        paymentReference: 'PAY-1',
+        orderId: 'ORDER-1',
+        createdAt: new Date('2026-06-05T00:00:00.000Z'),
+      },
+    },
+    {
+      shopId: 'shop-2',
+      currency: 'USD',
+      grossAmount: 945,
+      settlement: {
+        paymentReference: 'PAY-2',
+        orderId: 'ORDER-2',
+        createdAt: new Date('2026-06-05T00:00:00.000Z'),
+      },
     },
   ];
   const service = new ProfitLossService({
@@ -160,7 +203,17 @@ test('service filters journal entries to the authenticated shop scope', async ()
 
   assert.deepEqual(
     response.entries.map((entry) => entry.journalEntry.referenceId),
-    ['EXP-1', 'PAY-1'],
+    ['EXP-1', 'PAY-1', 'PAY-1'],
+  );
+  assert.deepEqual(
+    response.entries
+      .filter((entry) => entry.account.code === '2000')
+      .map((entry) => entry.amount),
+    [12],
+  );
+  assert.equal(
+    response.entries.find((entry) => entry.account.code === '2000')?.currency,
+    'MMK',
   );
 });
 

@@ -119,8 +119,26 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
       .filter((line) => Boolean(line.settlement.orderId))
       .map((line) => [line.settlement.paymentReference, line.settlement.orderId!]),
   );
+  const paymentCurrencyByReferenceAndShop = new Map(
+    data.paymentLines
+      .filter((line): line is typeof line & { shopId: string } => Boolean(line.shopId))
+      .map((line) => [`${line.settlement.paymentReference}\u0000${line.shopId}`, line.currency]),
+  );
 
   const reportEntries = data.entries.map((line) => {
+    if (
+      line.journalEntry.referenceType === 'PAYMENT'
+      && line.direction === 'CREDIT'
+      && line.account.code === '2000'
+      && /^Delivery fee payable(?:\s|$)/i.test(line.memo ?? '')
+    ) {
+      const shopMatch = String(line.memo ?? '').match(/(?:^|[\s,(])shop(?:_id)?=([^,\s)]+)/i);
+      const currency = shopMatch
+        ? paymentCurrencyByReferenceAndShop.get(`${line.journalEntry.referenceId}\u0000${shopMatch[1]}`)
+        : undefined;
+      return currency ? { ...line, currency } : line;
+    }
+
     if (
       line.journalEntry.referenceType !== 'PAYMENT'
       || line.account.type !== 'INCOME'
@@ -363,10 +381,14 @@ export class ProfitLossService implements IProfitLossService {
         const shopId = expenseShopByReference.get(entry.referenceId);
         return Boolean(shopId) && (allScope || authorizedShopIds.has(String(shopId)));
       }
-      if (entry.referenceType !== 'PAYMENT' || line.account.type !== 'INCOME' || line.direction !== 'CREDIT') {
+      if (entry.referenceType !== 'PAYMENT' || line.direction !== 'CREDIT') {
         return false;
       }
       const memo = String(line.memo ?? '');
+      const isIncomeLine = line.account.type === 'INCOME';
+      const isDeliveryFeeLine = line.account.code === '2000'
+        && /^Delivery fee payable(?:\s|$)/i.test(memo);
+      if (!isIncomeLine && !isDeliveryFeeLine) return false;
       const shopMatch = memo.match(/(?:^|[\s,(])shop(?:_id)?=([^,\s)]+)/i);
       if (!shopMatch) return false;
       const shopId = shopMatch[1];

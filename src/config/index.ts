@@ -13,5 +13,8 @@ export const config = {
   rabbitmqOrderPaidKey: process.env.RABBITMQ_ORDER_PAID_KEY || 'order.paid',
   rabbitmqPaymentQueue: process.env.RABBITMQ_PAYMENT_QUEUE || 'accounting.payment_completed',
   rabbitmqPaymentDlq: process.env.RABBITMQ_PAYMENT_DLQ || 'accounting.payment_completed.dlq',
+  accountingEventsExchange: process.env.ACCOUNTING_EVENTS_EXCHANGE || 'accounting.events',
+  accountingJournalEntryRoutingKey:
+    process.env.ACCOUNTING_JOURNAL_ENTRY_ROUTING_KEY || 'accounting.journal-entry.upserted',
   nodeEnv: process.env.NODE_ENV || 'development',
 };

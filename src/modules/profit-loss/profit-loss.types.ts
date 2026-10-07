@@ -59,12 +59,14 @@ export type ProfitLossLedgerEntry = {
   direction: string;
   amount: MoneyValue;
   memo: string | null;
+  currency?: string;
   journalEntry: {
     referenceType: string;
     referenceId: string;
   };
   account: {
     type: string;
+    code?: string;
   };
 };
 

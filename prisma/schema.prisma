@@ -240,7 +240,7 @@ model PnlOrderShop {
   shopOrderId               String?
   sourceEventId             String
   shopId                    String
-  currency                  String                       @default("USD")
+  currency                  String                       @default("MMK")
   grossItemSales            Decimal                      @db.Decimal(10, 2)
   discountTotal             Decimal                      @db.Decimal(10, 2)
   shippingTotal             Decimal                      @db.Decimal(10, 2)
@@ -278,6 +278,7 @@ model JournalEntry {
   eventId       String?     @unique
   narration     String?
   entryDate     DateTime    @default(now())
+  version       Int         @default(1)
   status        String   @default("POSTED")
   statusDomain  String   @default("ENTRY")
   createdAt     DateTime    @default(now())
@@ -288,6 +289,18 @@ model JournalEntry {
 
   @@index([statusDomain, status])
   @@unique([referenceType, referenceId])
+}
+
+model AccountingOutboxEvent {
+  id          String    @id @default(cuid())
+  eventId     String    @unique
+  eventType   String
+  routingKey  String
+  payload     Json
+  publishedAt DateTime? @db.Timestamp(3)
+  createdAt   DateTime  @default(now()) @db.Timestamp(3)
+
+  @@index([publishedAt, createdAt])
 }
 
 model EntryLine {
