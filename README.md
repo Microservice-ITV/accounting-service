@@ -50,6 +50,18 @@ Invoke-RestMethod http://localhost:4005/api/v1/entries/reference/PAYMENT/<paymen
 
 The RabbitMQ consumer acknowledges a message only after the journal transaction commits. Failed database operations are requeued; malformed or invalid events are dead-lettered.
 
+## Shop delivery expense integration
+
+Shop-paid delivery expenses are created from the Delivery Service `shipment.delivered` event, not from `order.paid` or customer checkout shipping charges. Accounting reads the stable provider ID from `data.provider_id` (also serialized as `data.delivery.providerId`) and looks up the active effective-dated fee directly in `DeliveryProviderFee`. Delivery Service owns provider identities; Accounting stores only external provider IDs with charging basis and fee configuration. The delivered-event payload does not include the accounting fee or its currency.
+
+Delivery provider fee rules are runtime-managed through the Accounting admin API and are not created by the seed script. Configure a fee using the provider ID returned by Delivery Service; use effective-dated rules to change the amount or charging basis without relying on provider names or seeded IDs.
+
+Accounting uses `data.shop_id` (also serialized as `data.delivery.shopId`) for shop attribution and verifies item attribution when present. A delivery with missing shop attribution or multiple distinct shop IDs is rejected to the shipment-delivered dead-letter queue; Accounting does not invent a shop-order ID or split a single provider fee across shops. PER_ORDER expenses are idempotent per provider/shop/order, and PER_DAY expenses per provider/shop/UTC day. Customer-paid delivery charges are not used.
+
+For `PER_ORDER`, Accounting records one charge for each distinct provider/shop/order using the configured fee. For `PER_DAY`, it records one charge per provider/shop/UTC day, regardless of the number of delivered orders on that day. Stable charge references and a transaction-scoped PostgreSQL advisory lock prevent duplicate expense and journal creation when events are repeated or processed concurrently. Each accepted charge creates an approved expense and a balanced debit to Operating Expenses (`5000`) and credit to Cash (`1000`); `data.order_id`, `data.delivery.deliveryNumber`, and `data.delivery.timeline.deliveredAt` remain delivery metadata. Daily grouping uses UTC because the event carries a timestamp but no business timezone.
+
+Journal lines do not currently have a currency field, so their amounts follow the existing accounting convention and are not currency-converted; mixed-currency journal reporting is therefore not represented at the line level.
+
 ## Journal-entry CQRS projection
 
 PostgreSQL remains the accounting write model. Every journal-entry insert or replacement writes an `AccountingOutboxEvent` in the same Prisma transaction. The outbox publisher sends durable `accounting.journal-entry.upserted` events to the `accounting.events` topic exchange and marks them published only after RabbitMQ confirms delivery. At service startup it also queues one snapshot per existing entry, so the read model can be populated without manually copying database records.

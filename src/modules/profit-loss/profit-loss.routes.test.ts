@@ -178,7 +178,7 @@ test('service filters journal entries to the authenticated shop scope', async ()
     },
     {
       shopId: 'shop-2',
-      currency: 'USD',
+      currency: 'MMK',
       grossAmount: 945,
       settlement: {
         paymentReference: 'PAY-2',
@@ -416,7 +416,7 @@ test('currency totals are not combined when transactions use different currencie
     ...emptyData(),
     salesProjections: [
       sales({ currency: 'MMK' }),
-      sales({ shopId: 'shop-1', currency: 'USD' }),
+      sales({ shopId: 'shop-1', currency: 'MMK' }),
     ],
   });
 

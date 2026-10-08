@@ -151,7 +151,7 @@ CREATE TABLE "PaymentSettlement" (
     "checkoutId" TEXT,
     "eventId" TEXT,
     "journalEntryId" TEXT,
-    "currency" TEXT NOT NULL DEFAULT 'USD',
+    "currency" TEXT NOT NULL DEFAULT 'MMK',
     "totalAmount" DECIMAL(65,30) NOT NULL,
     "sellerPayableAmount" DECIMAL(65,30) NOT NULL DEFAULT 0,
     "status" TEXT NOT NULL DEFAULT 'POSTED',
@@ -169,7 +169,7 @@ CREATE TABLE "PaymentSettlementLine" (
     "sellerId" TEXT,
     "grossAmount" DECIMAL(65,30) NOT NULL,
     "payableAmount" DECIMAL(65,30) NOT NULL DEFAULT 0,
-    "currency" TEXT NOT NULL DEFAULT 'USD',
+    "currency" TEXT NOT NULL DEFAULT 'MMK',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "PaymentSettlementLine_pkey" PRIMARY KEY ("id")
