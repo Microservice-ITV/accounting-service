@@ -14,13 +14,12 @@ const shipmentDeliveredSchema = z.object({
   timestamp: z.string().optional(),
   data: z.object({
     order_id: z.string().min(1),
-    provider_id: z.string().min(1).nullish(),
-    shop_id: z.string().min(1).nullish(),
+    deliveryCompanyId: z.string().min(1),
+    shopId: z.string().min(1).nullish(),
     delivery: z.object({
       deliveryId: z.string().min(1),
       deliveryNumber: z.string().min(1),
-      providerId: z.string().min(1).nullish(),
-      provider_id: z.string().min(1).nullish(),
+      deliveryCompanyId: z.string().min(1),
       shopId: z.string().min(1).nullish(),
       courier: z.object({
         code: z.string().nullish(),
@@ -54,8 +53,7 @@ export type DeliveryExpenseInput = {
   orderId: string;
   deliveryId: string;
   deliveryNumber: string;
-  providerId: string;
-  legacyProviderCode: string | null;
+  deliveryCompanyId: string;
   shopId: string;
   expenseDate: Date;
   description: string;
@@ -63,25 +61,11 @@ export type DeliveryExpenseInput = {
 
 export function buildShipmentDeliveredExpense(event: ShipmentDeliveredEvent): DeliveryExpenseInput {
   const delivery = event.data.delivery;
-  const providerIds = [
-    event.data.provider_id,
-    delivery.providerId,
-    delivery.provider_id,
-  ].filter((providerId): providerId is string => Boolean(providerId?.trim()))
-    .map((providerId) => providerId.trim());
-  const distinctProviderIds = [...new Set(providerIds)];
-  if (distinctProviderIds.length === 0) {
+  if (delivery.deliveryCompanyId !== event.data.deliveryCompanyId) {
     throw new PermanentShipmentDeliveredEventError(
-      `shipment.delivered for delivery ${delivery.deliveryId} is missing the Delivery Service provider ID`
+      `shipment.delivered for delivery ${delivery.deliveryId} contains conflicting Delivery Company IDs`,
     );
   }
-  if (distinctProviderIds.length > 1) {
-    throw new PermanentShipmentDeliveredEventError(
-      `shipment.delivered for delivery ${delivery.deliveryId} contains conflicting provider IDs`
-    );
-  }
-  const providerId = distinctProviderIds[0];
-
   const deliveredAt = new Date(delivery.timeline.deliveredAt);
   if (Number.isNaN(deliveredAt.getTime())) {
     throw new PermanentShipmentDeliveredEventError(
@@ -91,7 +75,7 @@ export function buildShipmentDeliveredExpense(event: ShipmentDeliveredEvent): De
 
   const items = delivery.items ?? [];
   const shopIds = items.map((item) => item.shopId?.trim() ?? '');
-  const declaredShopId = event.data.shop_id?.trim() || delivery.shopId?.trim() || '';
+  const declaredShopId = event.data.shopId?.trim() || delivery.shopId?.trim() || '';
   if (shopIds.some((shopId) => !shopId) && !declaredShopId) {
     throw new PermanentShipmentDeliveredEventError(
       `shipment.delivered for delivery ${delivery.deliveryId} has no complete item shop attribution`
@@ -117,8 +101,7 @@ export function buildShipmentDeliveredExpense(event: ShipmentDeliveredEvent): De
     orderId: event.data.order_id,
     deliveryId: delivery.deliveryId,
     deliveryNumber: delivery.deliveryNumber,
-    providerId,
-    legacyProviderCode: delivery.courier.code?.trim() || null,
+    deliveryCompanyId: event.data.deliveryCompanyId,
     shopId,
     expenseDate: deliveredAt,
     description,
@@ -126,7 +109,7 @@ export function buildShipmentDeliveredExpense(event: ShipmentDeliveredEvent): De
 }
 
 type DeliveryFeeCandidate = Pick<
-  Prisma.DeliveryProviderFeeGetPayload<{}>,
+  Prisma.DeliveryCompanyFeeGetPayload<{}>,
   'id' | 'chargingBasis' | 'amount' | 'currency' | 'active' | 'effectiveFrom' | 'effectiveTo' | 'createdAt'
 >;
 
@@ -160,44 +143,35 @@ export function selectApplicableDeliveryFee(
 
 export function buildDeliveryExpenseReference(
   chargingBasis: 'PER_ORDER' | 'PER_DAY',
-  input: Pick<DeliveryExpenseInput, 'providerId' | 'shopId' | 'orderId' | 'expenseDate'>,
+  input: Pick<DeliveryExpenseInput, 'deliveryCompanyId' | 'shopId' | 'orderId' | 'expenseDate'>,
 ): string {
+  if (!input.deliveryCompanyId) {
+    throw new PermanentShipmentDeliveredEventError('Delivery Company ID is required for a canonical expense reference');
+  }
   const chargeKey = chargingBasis === 'PER_ORDER'
-    ? [input.providerId, input.shopId, input.orderId]
-    : [input.providerId, input.shopId, input.expenseDate.toISOString().slice(0, 10)];
+    ? [input.shopId, input.deliveryCompanyId, input.orderId]
+    : [input.shopId, input.deliveryCompanyId, input.expenseDate.toISOString().slice(0, 10)];
   const digest = createHash('sha256').update(JSON.stringify(chargeKey)).digest('hex');
   return `DELI-${chargingBasis === 'PER_ORDER' ? 'ORDER' : 'DAY'}-${digest}`;
 }
 
 function getCandidateDeliveryExpenseReferences(input: DeliveryExpenseInput): string[] {
-  const references = [
+  return [
+    `DELI-${input.deliveryId}`,
     buildDeliveryExpenseReference('PER_ORDER', input),
     buildDeliveryExpenseReference('PER_DAY', input),
-    `DELI-${input.deliveryId}`,
   ];
-  if (input.legacyProviderCode) {
-    const legacyInput = {
-      providerId: input.legacyProviderCode,
-      shopId: input.shopId,
-      orderId: input.orderId,
-      expenseDate: input.expenseDate,
-    };
-    references.push(
-      buildDeliveryExpenseReference('PER_ORDER', legacyInput),
-      buildDeliveryExpenseReference('PER_DAY', legacyInput),
-    );
-  }
-  return [...new Set(references)];
 }
 
 async function findApplicableDeliveryFee(
   transaction: Prisma.TransactionClient,
-  providerId: string,
+  input: DeliveryExpenseInput,
   effectiveAt: Date,
 ) {
-  const fees = await transaction.deliveryProviderFee.findMany({
+  const fees = await transaction.deliveryCompanyFee.findMany({
     where: {
-      providerId,
+      shopId: input.shopId,
+      deliveryCompanyId: input.deliveryCompanyId,
       active: true,
       AND: [
         { OR: [{ effectiveFrom: null }, { effectiveFrom: { lte: effectiveAt } }] },
@@ -208,7 +182,7 @@ async function findApplicableDeliveryFee(
 
   const fee = selectApplicableDeliveryFee(fees, effectiveAt);
   if (!fee) {
-    throw new Error(`No active delivery fee applies to provider ID ${providerId} at ${effectiveAt.toISOString()}`);
+    throw new Error(`No active delivery fee applies to shop ${input.shopId} / Delivery Company ${input.deliveryCompanyId} at ${effectiveAt.toISOString()}`);
   }
 
   return fee;
@@ -231,7 +205,7 @@ export async function recordShipmentDeliveredExpenses(
     let expense = existingCharge;
 
     if (!expense) {
-      const fee = await findApplicableDeliveryFee(tx, input.providerId, input.expenseDate);
+      const fee = await findApplicableDeliveryFee(tx, input, input.expenseDate);
       const expenseNo = buildDeliveryExpenseReference(fee.chargingBasis, input);
 
       await tx.$executeRaw`
@@ -248,11 +222,11 @@ export async function recordShipmentDeliveredExpenses(
       if (!expense) {
         const category = await tx.expenseCategory.upsert({
           where: { code: 'DELI' },
-          update: { name: 'Deli', description: 'Shop-paid delivery-provider expense' },
+          update: { name: 'Deli', description: 'Shop-paid delivery-company expense' },
           create: {
             code: 'DELI',
             name: 'Deli',
-            description: 'Shop-paid delivery-provider expense',
+            description: 'Shop-paid delivery-company expense',
           },
           select: { id: true },
         });
@@ -261,13 +235,13 @@ export async function recordShipmentDeliveredExpenses(
           expenseNo,
           scope: 'SHOP',
           shopId: input.shopId,
-          deliveryProviderId: input.providerId,
+          deliveryCompanyId: input.deliveryCompanyId,
           expenseTypeId: category.id,
           expenseAccountCode: '5000',
           fundingAccountCode: '1000',
           amount: fee.amount,
           currency: fee.currency,
-          description: `${input.description} (provider ${input.providerId}; ${fee.chargingBasis})`,
+          description: `${input.description} (company ${input.deliveryCompanyId}; ${fee.chargingBasis})`,
           expenseDate: input.expenseDate,
           status: 'APPROVED',
         }, tx);

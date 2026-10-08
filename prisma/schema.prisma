@@ -94,19 +94,21 @@ model ExpenseCategory {
   @@index([statusDomain, status])
 }
 
-model DeliveryProviderFee {
-  id            String                @id @default(cuid())
-  providerId    String
-  chargingBasis DeliveryChargingBasis @default(PER_ORDER)
-  amount        Decimal               @db.Decimal(10, 2)
-  currency      String
-  active        Boolean               @default(true)
-  effectiveFrom DateTime?
-  effectiveTo   DateTime?
-  createdAt     DateTime              @default(now())
-  updatedAt     DateTime              @updatedAt
+model DeliveryCompanyFee {
+  id                String                @id @default(cuid())
+  shopId            String?
+  deliveryCompanyId String?
+  chargingBasis     DeliveryChargingBasis @default(PER_ORDER)
+  amount            Decimal               @db.Decimal(10, 2)
+  currency          String
+  active            Boolean               @default(true)
+  effectiveFrom     DateTime?
+  effectiveTo       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
 
-  @@index([providerId, active, effectiveFrom, effectiveTo], map: "delivery_provider_fee_effective_idx")
+  @@index([shopId, deliveryCompanyId, active, effectiveFrom, effectiveTo], map: "delivery_company_fee_shop_company_effective_idx")
+  @@map("delivery_company_fees")
 }
 
 model Expense {
@@ -114,7 +116,7 @@ model Expense {
   expenseNo          String       @unique
   scope              ExpenseScope @default(SHOP)
   shopId             String?
-  deliveryProviderId String?
+  deliveryCompanyId  String?
   createdByUserId    String?
   sellerUserId       String?
   expenseTypeId      String
@@ -136,7 +138,7 @@ model Expense {
   statusDefinition AccountingStatus  @relation("ExpenseStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
 
   @@index([shopId, status])
-  @@index([deliveryProviderId])
+  @@index([deliveryCompanyId])
   @@index([scope, status])
   @@index([createdByUserId, status])
   @@index([sellerUserId, status])

@@ -12,10 +12,11 @@ services:
       - ./.env
     environment:
       PORT: 4005
-      RUN_MIGRATIONS: "true"
-      RUN_SEED: "true"
-      ACCOUNTING_ENABLE_SEED: "true"
+      RUN_MIGRATIONS: "false"
+      RUN_SEED: "false"
+      ACCOUNTING_ENABLE_SEED: "false"
       AUTH_SERVICE_BASE_URL: http://authservice-nginx/api/v1
+      SHIPPING_SERVICE_BASE_URL: ${SHIPPING_SERVICE_BASE_URL:-http://shippingservice-nginx/shipping}
       DATABASE_URL: postgresql://postgres:postgres@accounting-db:5432/accounting_service?schema=public
       RABBITMQ_URL: ${PAYMENT_RABBITMQ_URL:-amqp://guest:guest@orderservice-rabbitmq:5672}
       RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-order_events}
@@ -31,7 +32,6 @@ services:
         condition: service_started
       rabbitmq:
         condition: service_started
-    command: sh -c "npm run build && npm run start"
     networks:
       - accounting-network
       - itv-network
