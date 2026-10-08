@@ -6,6 +6,10 @@ import {
   startShipmentDeliveredConsumer,
 } from './infrastructure/rabbitmq/shipment-delivered.consumer.js';
 import {
+  closeDeliveryCompanyConfigurationRpcConsumer,
+  startDeliveryCompanyConfigurationRpcConsumer,
+} from './infrastructure/rabbitmq/delivery-company-configuration.rpc.consumer.js';
+import {
   closeJournalEntryOutboxPublisher,
   startJournalEntryOutboxPublisher,
 } from './infrastructure/rabbitmq/journal-entry-outbox.publisher.js';
@@ -19,6 +23,9 @@ startPaymentConsumer().catch((error) => {
 });
 startShipmentDeliveredConsumer().catch((error) => {
   console.error('Failed to start shipment-delivered accounting consumer', error);
+});
+startDeliveryCompanyConfigurationRpcConsumer().catch((error) => {
+  console.error('Failed to start Delivery Company configuration RPC consumer', error);
 });
 startJournalEntryOutboxPublisher();
 
@@ -38,6 +45,7 @@ const shutdown = async () => {
   await Promise.allSettled([
     closePaymentConsumer(),
     closeShipmentDeliveredConsumer(),
+    closeDeliveryCompanyConfigurationRpcConsumer(),
     closeJournalEntryOutboxPublisher(),
     new Promise<void>((resolve) => server.close(() => resolve())),
   ]);

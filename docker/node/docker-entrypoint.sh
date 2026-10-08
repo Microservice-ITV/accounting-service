@@ -5,6 +5,11 @@ cd /var/www/html/accounting-service
 
 echo "Starting Accounting Service..."
 
+if [ -z "${ORDER_SERVICE_API_KEY:-}" ]; then
+  echo "ORDER_SERVICE_API_KEY must be set" >&2
+  exit 1
+fi
+
 echo "Checking DATABASE_URL..."
 
 echo "DB (shell): $DATABASE_URL"

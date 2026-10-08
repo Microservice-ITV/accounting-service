@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import { timingSafeEqual } from 'node:crypto';
 
 export type AuthenticatedExpenseContext = {
   userId: string;
@@ -8,6 +9,15 @@ export type AuthenticatedExpenseContext = {
   authorizedShopIds: string[];
   shops: Array<{ shop_id?: string | null; shop_name?: string | null; shop_domain?: string | null; membership_status?: string | null; role?: { code?: string | null; name?: string | null } | null }>;
 };
+
+const platformExpenseRoles = new Set([
+  'platform_super_admin',
+  'super_admin',
+  'platform_finance',
+  'platform_director',
+  'platform_cfo',
+  'cfo',
+]);
 
 function getBearerToken(headerValue: string | string[] | undefined): string | undefined {
   if (Array.isArray(headerValue)) {
@@ -96,15 +106,7 @@ export async function resolveAuthenticatedExpenseContext(req: Request): Promise<
     throw new Error('Unauthenticated');
   }
 
-  const platformRoles = new Set([
-    'platform_super_admin',
-    'super_admin',
-    'platform_finance',
-    'platform_director',
-    'platform_cfo',
-    'cfo',
-  ]);
-  const isPlatformUser = platformRoles.has(context.role?.trim().toLowerCase() ?? '');
+  const isPlatformUser = platformExpenseRoles.has(context.role?.trim().toLowerCase() ?? '');
 
   if (!context.activeShopId && context.authorizedShopIds.length === 0 && !isPlatformUser) {
     throw new Error('Seller is not assigned to any authorized shop');
@@ -129,6 +131,47 @@ export function requireExpenseAuth(req: Request, _res: Response, next: NextFunct
       const status = /unauthenticated|unauthorized|token/i.test(message) ? 401 : 403;
       const response = _res as Response & { statusCode?: number };
       response.status(status).json({ error: message });
+    }
+  })();
+}
+
+function hasValidOrderServiceKey(req: Request): boolean {
+  const expected = process.env.ORDER_SERVICE_API_KEY;
+  const provided = req.header('x-service-key');
+  if (!expected || !provided) return false;
+
+  const expectedBytes = Buffer.from(expected);
+  const providedBytes = Buffer.from(provided);
+  return expectedBytes.length === providedBytes.length && timingSafeEqual(expectedBytes, providedBytes);
+}
+
+export function requireDeliveryCompanyConfigurationAccess(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  if (hasValidOrderServiceKey(req)) {
+    return next();
+  }
+
+  void (async () => {
+    try {
+      const context = await resolveAuthenticatedExpenseContext(req);
+      const shopId = Array.isArray(req.params.shopId) ? req.params.shopId[0] : req.params.shopId;
+      const isPlatformUser = platformExpenseRoles.has(context.role?.trim().toLowerCase() ?? '');
+      const canAccessShop = context.activeShopId === shopId
+        || context.authorizedShopIds.includes(shopId);
+
+      if (!isPlatformUser && !canAccessShop) {
+        return res.status(403).json({ error: 'User is not authorized for the selected shop' });
+      }
+
+      (req as Request & { auth?: AuthenticatedExpenseContext }).auth = context;
+      return next();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unauthorized';
+      const status = /unauthenticated|unauthorized|token/i.test(message) ? 401 : 403;
+      return res.status(status).json({ error: message });
     }
   })();
 }

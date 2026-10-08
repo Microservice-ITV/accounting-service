@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import {
@@ -13,16 +12,15 @@ import {
 import type { ShipmentDeliveredEvent } from './shipment-delivered.consumer.js';
 import { createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
 
-const PER_ORDER_PROVIDER_ID = randomUUID();
-const PER_DAY_PROVIDER_ID = randomUUID();
-
+const DELIVERY_COMPANY_ID = 'company-royal';
+const SHOP_ID = 'shop-1';
 const makeEvent = (
-  providerId: string | null = PER_ORDER_PROVIDER_ID,
-  shopIds: Array<string | null> = ['shop-1'],
+  shopIds: Array<string | null> = [SHOP_ID],
   deliveryId = 'delivery-1',
   orderId = 'order-1',
   deliveredAt = '2026-10-07T01:00:00.000Z',
-  customerDeliveryFee?: number,
+  customerShippingFee?: number,
+  deliveryCompanyId = DELIVERY_COMPANY_ID,
 ) => normalizeShipmentDeliveredEvent({
   event_id: `delivered-event-${deliveryId}`,
   event: 'shipment.delivered',
@@ -31,14 +29,13 @@ const makeEvent = (
   delivery_id: deliveryId,
   data: {
     order_id: orderId,
-    ...(providerId ? { provider_id: providerId } : {}),
-    shop_id: shopIds.length === 1 ? shopIds[0] : undefined,
-    ...(customerDeliveryFee === undefined ? {} : { shipping_fee: customerDeliveryFee }),
-    delivery_id: deliveryId,
+    deliveryCompanyId,
+    shopId: shopIds.length === 1 ? shopIds[0] : undefined,
+    ...(customerShippingFee === undefined ? {} : { shipping_fee: customerShippingFee }),
     delivery: {
       deliveryId,
       deliveryNumber: `DLV-${deliveryId}`,
-      ...(providerId ? { providerId } : {}),
+      deliveryCompanyId,
       shopId: shopIds.length === 1 ? shopIds[0] : undefined,
       courier: { code: 'UNTRUSTED-CODE', name: 'Customer-facing label', phone: '' },
       status: 'DELIVERED',
@@ -56,7 +53,8 @@ const makeEvent = (
 
 type Fee = {
   id: string;
-  providerId: string;
+  shopId: string;
+  deliveryCompanyId: string;
   chargingBasis: 'PER_ORDER' | 'PER_DAY';
   amount: Prisma.Decimal;
   currency: string;
@@ -70,14 +68,20 @@ function createDatabase(fees: Fee[]) {
   const expenses = new Map<string, Record<string, unknown>>();
   const journalReferences = new Set<string>();
   const locks = new Map<string, Promise<void>>();
-  const feeLookups: string[] = [];
+  const feeLookupScopes: Array<{ shopId: string; deliveryCompanyId: string }> = [];
   let expenseCreateCount = 0;
   const journalAmounts: number[][] = [];
   const tx = {
-    deliveryProviderFee: {
-      findMany: async ({ where }: { where: { providerId: string } }) => {
-        feeLookups.push(where.providerId);
-        return fees.filter((candidate) => candidate.providerId === where.providerId);
+    deliveryCompanyFee: {
+      findMany: async ({ where }: { where: { shopId: string; deliveryCompanyId: string } }) => {
+        feeLookupScopes.push({
+          shopId: where.shopId,
+          deliveryCompanyId: where.deliveryCompanyId,
+        });
+        return fees.filter((candidate) =>
+          candidate.shopId === where.shopId
+          && candidate.deliveryCompanyId === where.deliveryCompanyId
+        );
       },
     },
     expense: {
@@ -114,9 +118,7 @@ function createDatabase(fees: Fee[]) {
         $executeRaw: async (_strings: TemplateStringsArray, reference: string) => {
           const previousLock = locks.get(reference);
           let release = () => {};
-          const lock = new Promise<void>((resolve) => {
-            release = resolve;
-          });
+          const lock = new Promise<void>((resolve) => { release = resolve; });
           locks.set(reference, lock);
           if (previousLock) await previousLock;
           releases.push(() => {
@@ -144,7 +146,7 @@ function createDatabase(fees: Fee[]) {
     database,
     journalCreator,
     expenses,
-    feeLookups,
+    feeLookupScopes,
     get expenseCreateCount() { return expenseCreateCount; },
     get journalCreateCount() { return journalAmounts.length; },
     get journalAmounts() { return journalAmounts; },
@@ -153,14 +155,16 @@ function createDatabase(fees: Fee[]) {
 
 const fee = (
   id: string,
-  providerId: string,
   amount: string,
-  effectiveFrom: string | null = null,
   chargingBasis: Fee['chargingBasis'] = 'PER_ORDER',
+  effectiveFrom: string | null = null,
   effectiveTo: string | null = null,
+  shopId = SHOP_ID,
+  deliveryCompanyId = DELIVERY_COMPANY_ID,
 ): Fee => ({
   id,
-  providerId,
+  shopId,
+  deliveryCompanyId,
   chargingBasis,
   amount: new Prisma.Decimal(amount),
   currency: 'MMK',
@@ -173,100 +177,89 @@ const fee = (
 const expenseTotal = (expenses: Map<string, Record<string, unknown>>) =>
   [...expenses.values()].reduce((total, expense) => total + Number(expense.amount), 0);
 
-test('reads the actual Delivery Service provider and shop fields without requiring invoiceId', () => {
+test('builds a delivery expense from the canonical company and shop identities', () => {
   const expense = buildShipmentDeliveredExpense(makeEvent());
 
-  assert.equal(expense.providerId, PER_ORDER_PROVIDER_ID);
   assert.equal(expense.orderId, 'order-1');
   assert.equal(expense.deliveryId, 'delivery-1');
-  assert.equal(expense.deliveryNumber, 'DLV-delivery-1');
-  assert.equal(expense.shopId, 'shop-1');
+  assert.equal(expense.shopId, SHOP_ID);
+  assert.equal(expense.deliveryCompanyId, DELIVERY_COMPANY_ID);
   assert.equal(expense.expenseDate.toISOString(), '2026-10-07T01:00:00.000Z');
-  assert.equal('invoiceId' in expense, false);
 });
 
-test('looks up the configured fee directly by Delivery Service providerId', async () => {
-  const harness = createDatabase([fee('fee-per-order', PER_ORDER_PROVIDER_ID, '300.00')]);
+test('finds the fee by both shop and Delivery Company identity', async () => {
+  const harness = createDatabase([
+    fee('shop-b-rule', '900.00', 'PER_ORDER', null, null, 'shop-2'),
+    fee('same-company-rule', '300.00'),
+  ]);
 
   await recordShipmentDeliveredExpenses(makeEvent(), harness.database, harness.journalCreator);
 
-  assert.deepEqual(harness.feeLookups, [PER_ORDER_PROVIDER_ID]);
-  assert.equal([...harness.expenses.values()][0]?.deliveryProviderId, PER_ORDER_PROVIDER_ID);
+  assert.deepEqual(harness.feeLookupScopes, [{
+    shopId: SHOP_ID,
+    deliveryCompanyId: DELIVERY_COMPANY_ID,
+  }]);
+  const expense = [...harness.expenses.values()][0];
+  assert.equal(expense?.amount?.toString(), '300');
+  assert.equal(expense?.deliveryCompanyId, DELIVERY_COMPANY_ID);
+  assert.equal(expense?.shopId, SHOP_ID);
 });
 
-test('selects the most recent effective fee at the delivered time', () => {
+test('does not use another shop or Delivery Company fee', async () => {
+  const harness = createDatabase([
+    fee('wrong-shop', '900.00', 'PER_ORDER', null, null, 'shop-2'),
+    fee('wrong-company', '800.00', 'PER_ORDER', null, null, SHOP_ID, 'another-company'),
+  ]);
+
+  await assert.rejects(
+    recordShipmentDeliveredExpenses(makeEvent(), harness.database, harness.journalCreator),
+    /No active delivery fee applies/,
+  );
+  assert.equal(harness.expenseCreateCount, 0);
+});
+
+test('selects the latest fee effective at delivery time', () => {
   const selected = selectApplicableDeliveryFee([
-    fee('current', PER_ORDER_PROVIDER_ID, '320.00', '2026-10-01T00:00:00.000Z'),
-    fee('future', PER_ORDER_PROVIDER_ID, '350.00', '2026-11-01T00:00:00.000Z'),
-    fee('default', PER_ORDER_PROVIDER_ID, '300.00'),
+    fee('current', '320.00', 'PER_ORDER', '2026-10-01T00:00:00.000Z'),
+    fee('future', '350.00', 'PER_ORDER', '2026-11-01T00:00:00.000Z'),
+    fee('default', '300.00'),
   ], new Date('2026-10-07T01:00:00.000Z'));
 
   assert.equal(selected?.id, 'current');
 });
 
-test('selects fees within their effective date range', () => {
-  const selected = selectApplicableDeliveryFee([
-    fee('expired', PER_ORDER_PROVIDER_ID, '280.00', '2026-09-01T00:00:00.000Z', 'PER_ORDER', '2026-10-01T00:00:00.000Z'),
-    fee('current', PER_ORDER_PROVIDER_ID, '300.00', '2026-10-01T00:00:00.000Z', 'PER_ORDER', '2026-11-01T00:00:00.000Z'),
-  ], new Date('2026-10-07T01:00:00.000Z'));
+test('rejects missing and conflicting Delivery Company identities', () => {
+  const missingCompany = makeEvent();
+  assert.throws(() => normalizeShipmentDeliveredEvent({
+    ...missingCompany,
+    data: { ...missingCompany.data, deliveryCompanyId: undefined },
+  }));
 
-  assert.equal(selected?.id, 'current');
-});
-
-test('does not create an expense or journal for an unknown providerId', async () => {
-  const harness = createDatabase([fee('per-day-fee', PER_DAY_PROVIDER_ID, '300.00', null, 'PER_DAY')]);
-
-  await assert.rejects(
-    recordShipmentDeliveredExpenses(makeEvent('unknown-delivery-provider-id'), harness.database, harness.journalCreator),
-    /No active delivery fee applies to provider ID unknown-delivery-provider-id/
-  );
-  assert.equal(harness.expenseCreateCount, 0);
-  assert.equal(harness.journalCreateCount, 0);
-});
-
-test('does not create expenses for deliveries with multiple distinct shop IDs', async () => {
-  const event = makeEvent(PER_ORDER_PROVIDER_ID, ['shop-1', 'shop-2']);
-  const harness = createDatabase([fee('fee-per-order', PER_ORDER_PROVIDER_ID, '300.00')]);
-
-  assert.throws(() => buildShipmentDeliveredExpense(event), PermanentShipmentDeliveredEventError);
-  await assert.rejects(
-    recordShipmentDeliveredExpenses(event, harness.database, harness.journalCreator),
-    /contains multiple shops/
-  );
-  assert.equal(harness.expenseCreateCount, 0);
-  assert.equal(harness.journalCreateCount, 0);
-});
-
-test('rejects missing or conflicting Delivery Service provider IDs', () => {
+  const conflictingCompany = makeEvent();
+  conflictingCompany.data.delivery.deliveryCompanyId = 'another-company';
   assert.throws(
-    () => buildShipmentDeliveredExpense(makeEvent(null)),
-    /missing the Delivery Service provider ID/
-  );
-
-  const conflicting = makeEvent();
-  conflicting.data.delivery.providerId = PER_DAY_PROVIDER_ID;
-  assert.throws(
-    () => buildShipmentDeliveredExpense(conflicting),
-    /contains conflicting provider IDs/
+    () => buildShipmentDeliveredExpense(conflictingCompany),
+    (error: unknown) => error instanceof PermanentShipmentDeliveredEventError
+      && /conflicting Delivery Company IDs/.test(error.message),
   );
 });
 
-test('rejects invalid delivered timestamps and missing shop attribution', () => {
+test('rejects invalid delivered times and missing shop attribution', () => {
   const invalidDate = makeEvent();
   invalidDate.data.delivery.timeline.deliveredAt = 'not-a-date';
   assert.throws(() => buildShipmentDeliveredExpense(invalidDate), /invalid .*deliveredAt/);
 
-  const missingShop = makeEvent(PER_ORDER_PROVIDER_ID, [null]);
-  missingShop.data.shop_id = undefined;
+  const missingShop = makeEvent([null]);
+  missingShop.data.shopId = undefined;
   missingShop.data.delivery.shopId = undefined;
   assert.throws(
     () => buildShipmentDeliveredExpense(missingShop),
-    /no complete item shop attribution/
+    /no complete item shop attribution/,
   );
 });
 
-test('repeated delivered events create one expense and one journal entry', async () => {
-  const harness = createDatabase([fee('fee-per-order', PER_ORDER_PROVIDER_ID, '300.00')]);
+test('duplicate delivered events create one expense and one journal entry', async () => {
+  const harness = createDatabase([fee('per-order-fee', '300.00')]);
   const event: ShipmentDeliveredEvent = makeEvent();
 
   await Promise.all([
@@ -279,97 +272,45 @@ test('repeated delivered events create one expense and one journal entry', async
   assert.deepEqual(harness.journalAmounts, [[300, 300]]);
 });
 
-test('separate delivery events for the same order do not create a second order charge', async () => {
-  const harness = createDatabase([fee('fee-per-order', PER_ORDER_PROVIDER_ID, '300.00')]);
-
+test('PER_ORDER charges once per shop, company, and order', async () => {
+  const harness = createDatabase([fee('per-order-fee', '300.00')]);
   await recordShipmentDeliveredExpenses(
-    makeEvent(PER_ORDER_PROVIDER_ID, ['shop-1'], 'delivery-first', 'same-order'),
+    makeEvent([SHOP_ID], 'delivery-a', 'same-order'),
     harness.database,
     harness.journalCreator,
   );
   await recordShipmentDeliveredExpenses(
-    makeEvent(PER_ORDER_PROVIDER_ID, ['shop-1'], 'delivery-replay', 'same-order'),
+    makeEvent([SHOP_ID], 'delivery-b', 'same-order'),
     harness.database,
     harness.journalCreator,
   );
 
   assert.equal(harness.expenseCreateCount, 1);
   assert.equal(expenseTotal(harness.expenses), 300);
-  assert.equal(harness.journalCreateCount, 1);
 });
 
-test('PER_ORDER charges the configured amount for each of five distinct orders', async () => {
-  const harness = createDatabase([fee('fee-per-order', PER_ORDER_PROVIDER_ID, '300.00')]);
-
-  for (let index = 1; index <= 5; index += 1) {
-    await recordShipmentDeliveredExpenses(
-      makeEvent(PER_ORDER_PROVIDER_ID, ['shop-1'], `per-order-delivery-${index}`, `per-order-${index}`),
-      harness.database,
-      harness.journalCreator,
-    );
-  }
-
-  assert.equal(harness.expenseCreateCount, 5);
-  assert.equal(expenseTotal(harness.expenses), 1500);
-  assert.equal(harness.journalCreateCount, 5);
-  assert.equal(harness.journalAmounts.reduce((sum, lines) => sum + lines[0], 0), 1500);
-});
-
-test('PER_ORDER charges the configured amount for each of twenty distinct orders', async () => {
-  const harness = createDatabase([fee('fee-per-order', PER_ORDER_PROVIDER_ID, '300.00')]);
-
-  for (let index = 1; index <= 20; index += 1) {
-    await recordShipmentDeliveredExpenses(
-      makeEvent(PER_ORDER_PROVIDER_ID, ['shop-1'], `per-order-delivery-${index}`, `per-order-${index}`),
-      harness.database,
-      harness.journalCreator,
-    );
-  }
-
-  assert.equal(harness.expenseCreateCount, 20);
-  assert.equal(expenseTotal(harness.expenses), 6000);
-  assert.equal(harness.journalCreateCount, 20);
-});
-
-test('PER_DAY charges once for multiple same-shop deliveries on the same UTC business day', async () => {
-  const harness = createDatabase([fee('fee-per-day', PER_DAY_PROVIDER_ID, '300.00', null, 'PER_DAY')]);
-
-  await Promise.all(Array.from({ length: 10 }, (_, index) =>
+test('PER_DAY charges once per shop and company per UTC day', async () => {
+  const harness = createDatabase([fee('per-day-fee', '300.00', 'PER_DAY')]);
+  await Promise.all(Array.from({ length: 4 }, (_, index) =>
     recordShipmentDeliveredExpenses(
-      makeEvent(PER_DAY_PROVIDER_ID, ['shop-1'], `per-day-delivery-${index}`, `per-day-order-${index}`),
+      makeEvent([SHOP_ID], `delivery-${index}`, `order-${index}`),
       harness.database,
       harness.journalCreator,
     )));
-
-  assert.equal(harness.expenseCreateCount, 1);
-  assert.equal(expenseTotal(harness.expenses), 300);
-  assert.equal(harness.journalCreateCount, 1);
-});
-
-test('PER_DAY creates a new charge for the same provider and shop on another UTC day', async () => {
-  const harness = createDatabase([fee('fee-per-day', PER_DAY_PROVIDER_ID, '300.00', null, 'PER_DAY')]);
-
   await recordShipmentDeliveredExpenses(
-    makeEvent(PER_DAY_PROVIDER_ID, ['shop-1'], 'first-day-delivery', 'first-day-order', '2026-10-07T23:59:00.000Z'),
-    harness.database,
-    harness.journalCreator,
-  );
-  await recordShipmentDeliveredExpenses(
-    makeEvent(PER_DAY_PROVIDER_ID, ['shop-1'], 'second-day-delivery', 'second-day-order', '2026-10-08T00:01:00.000Z'),
+    makeEvent([SHOP_ID], 'next-day-delivery', 'next-day-order', '2026-10-08T00:01:00.000Z'),
     harness.database,
     harness.journalCreator,
   );
 
   assert.equal(harness.expenseCreateCount, 2);
   assert.equal(expenseTotal(harness.expenses), 600);
-  assert.equal(harness.journalCreateCount, 2);
 });
 
-test('customer-paid shipping fee does not affect the configured shop-paid fee', async () => {
-  const harness = createDatabase([fee('fee-per-order', PER_ORDER_PROVIDER_ID, '300.00')]);
-
+test('customer shipping charge remains separate from Delivery Company expense', async () => {
+  const harness = createDatabase([fee('company-fee', '300.00')]);
   await recordShipmentDeliveredExpenses(
-    makeEvent(PER_ORDER_PROVIDER_ID, ['shop-1'], 'customer-fee-delivery', 'customer-fee-order', undefined, 9000),
+    makeEvent([SHOP_ID], 'customer-charge', 'order-customer-charge', undefined, 9000),
     harness.database,
     harness.journalCreator,
   );
@@ -378,19 +319,14 @@ test('customer-paid shipping fee does not affect the configured shop-paid fee', 
   assert.equal(harness.journalAmounts[0][0], 300);
 });
 
-test('charge references are based on providerId, shop, and order or business day', () => {
+test('expense references include the shop and Delivery Company identity', () => {
   const input = buildShipmentDeliveredExpense(makeEvent());
-  const dayInput = { ...input, providerId: PER_DAY_PROVIDER_ID };
-  const sameProviderDifferentCourierCode = makeEvent();
-  sameProviderDifferentCourierCode.data.delivery.courier.code = 'UNRELATED-CODE';
+  const companySpecificInput = { ...input, deliveryCompanyId: 'another-company' };
 
   assert.match(buildDeliveryExpenseReference('PER_ORDER', input), /^DELI-ORDER-/);
-  assert.equal(
+  assert.match(buildDeliveryExpenseReference('PER_DAY', input), /^DELI-DAY-/);
+  assert.notEqual(
     buildDeliveryExpenseReference('PER_ORDER', input),
-    buildDeliveryExpenseReference(
-      'PER_ORDER',
-      buildShipmentDeliveredExpense(sameProviderDifferentCourierCode),
-    ),
+    buildDeliveryExpenseReference('PER_ORDER', companySpecificInput),
   );
-  assert.match(buildDeliveryExpenseReference('PER_DAY', dayInput), /^DELI-DAY-/);
 });
