@@ -6,6 +6,7 @@ import expensesRoutes from './modules/expenses/expenses.routes.js';
 import expenseApprovalRoutes from './modules/expenses/expense-approval.routes.js';
 import approvalPolicyRoutes from './modules/expenses/approval-policy.routes.js';
 import profitLossRoutes from './modules/profit-loss/profit-loss.routes.js';
+import deliveryProviderFeeRoutes from './modules/delivery-provider-fees/delivery-provider-fees.routes.js';
 
 const app = express();
 const MAX_JSON_BODY = '10mb';
@@ -41,5 +42,6 @@ app.use('/api/v1', expensesRoutes);
 app.use('/api/v1', expenseApprovalRoutes);
 app.use('/api/v1', approvalPolicyRoutes);
 app.use('/api/v1', profitLossRoutes);
+app.use('/api/v1', deliveryProviderFeeRoutes);
 
 export default app;

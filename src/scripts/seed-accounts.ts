@@ -17,7 +17,7 @@ const defaultAccounts: Array<{
 ];
 
 const defaultExpenseCategories = [
-  { code: 'DELI', name: 'Deli', description: 'Delivery charge per shop order' },
+  { code: 'DELI', name: 'Deli', description: 'Shop-paid delivery-provider charges' },
   { code: 'OFFICE', name: 'Office', description: 'General office expenses' },
   { code: 'TRAVEL', name: 'Travel', description: 'Travel and transportation expenses' },
   { code: 'PURCHASE', name: 'Purchase', description: 'Business purchases and procurement' },
@@ -93,6 +93,6 @@ export async function seedRequiredMasterData() {
   }
 
   console.log(
-    'Accounting seed complete: only required master/reference data was ensured.',
+    'Accounting seed complete: required chart-of-account and expense-category data was ensured.',
   );
 }

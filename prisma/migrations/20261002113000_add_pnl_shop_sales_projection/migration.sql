@@ -4,7 +4,7 @@ CREATE TABLE "PnlOrderShop" (
     "shopOrderId" TEXT,
     "sourceEventId" TEXT NOT NULL,
     "shopId" TEXT NOT NULL,
-    "currency" TEXT NOT NULL DEFAULT 'USD',
+    "currency" TEXT NOT NULL DEFAULT 'MMK',
     "grossItemSales" DECIMAL(10,2) NOT NULL,
     "discountTotal" DECIMAL(10,2) NOT NULL,
     "shippingTotal" DECIMAL(10,2) NOT NULL,

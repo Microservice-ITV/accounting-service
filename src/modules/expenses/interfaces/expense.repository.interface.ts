@@ -30,6 +30,7 @@ export interface IExpenseRepository {
     referenceId: string;
   }>>;
   createExpense(input: Prisma.ExpenseUncheckedCreateInput, client?: ExpenseDbClient): Promise<ExpenseRecord>;
+  upsertExpense(input: Prisma.ExpenseUncheckedCreateInput, client?: ExpenseDbClient): Promise<ExpenseRecord>;
   findExpenseById(expenseId: string, client?: ExpenseDbClient): Promise<ExpenseRecord | null>;
   updateReturnedExpense(expenseId: string, input: Prisma.ExpenseUncheckedUpdateInput, client?: ExpenseDbClient): Promise<ExpenseWithCategory>;
   listExpenses(shopIds: string[], client?: ExpenseDbClient): Promise<ExpenseRecord[]>;

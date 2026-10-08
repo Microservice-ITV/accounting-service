@@ -46,6 +46,14 @@ export class ExpenseRepository implements IExpenseRepository {
     return client.expense.create({ data: input });
   }
 
+  upsertExpense(input: Prisma.ExpenseUncheckedCreateInput, client: ExpenseDbClient = prisma) {
+    return client.expense.upsert({
+      where: { expenseNo: input.expenseNo },
+      update: {},
+      create: input,
+    });
+  }
+
   findExpenseById(expenseId: string, client: ExpenseDbClient = prisma) {
     return client.expense.findUnique({ where: { id: expenseId } });
   }
