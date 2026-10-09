@@ -21,7 +21,7 @@ fi
 
 echo "Waiting for database..."
 
-if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then
+if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
     echo "Running Prisma migrations..."
     DATABASE_URL="$DATABASE_URL" \
     npx prisma migrate deploy --schema=./prisma/schema.prisma

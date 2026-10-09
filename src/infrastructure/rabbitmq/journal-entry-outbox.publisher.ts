@@ -17,6 +17,18 @@ const logError = (message: string, error: unknown): void => {
   console.error(message, error);
 };
 
+const isMissingTableError = (error: unknown, modelName: string): boolean => {
+  const prismaError = error as { code?: string; meta?: { modelName?: string; table?: string } };
+  return (
+    prismaError?.code === 'P2021' &&
+    (
+      prismaError?.meta?.modelName === modelName ||
+      prismaError?.meta?.table === `public.${modelName}` ||
+      prismaError?.meta?.table === modelName
+    )
+  );
+};
+
 const getConfirmChannel = async (): Promise<ConfirmChannel> => {
   if (channel) return channel;
 
@@ -50,25 +62,35 @@ const queueExistingEntrySnapshots = async (): Promise<void> => {
   let cursor: string | undefined;
 
   while (true) {
-    const entries = await prisma.journalEntry.findMany({
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-      take: EVENT_BATCH_SIZE,
-      orderBy: { id: 'asc' },
-      include: {
-        lines: {
-          include: {
-            account: {
-              select: {
-                id: true,
-                code: true,
-                name: true,
-                type: true,
+    let entries;
+    try {
+      entries = await prisma.journalEntry.findMany({
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        take: EVENT_BATCH_SIZE,
+        orderBy: { id: 'asc' },
+        include: {
+          lines: {
+            include: {
+              account: {
+                select: {
+                  id: true,
+                  code: true,
+                  name: true,
+                  type: true,
+                },
               },
             },
           },
         },
-      },
-    });
+      });
+    } catch (error) {
+      const prismaError = error as { code?: string; meta?: { modelName?: string; table?: string } };
+      if (prismaError?.code === 'P2021' && prismaError?.meta?.modelName === 'JournalEntry') {
+        console.warn('JournalEntry table not found; skipping outbox snapshot backfill until migrations complete.');
+        return;
+      }
+      throw error;
+    }
 
     if (entries.length === 0) return;
 

@@ -6,6 +6,7 @@ import {
   buildShipmentDeliveredExpense,
   normalizeShipmentDeliveredEvent,
   PermanentShipmentDeliveredEventError,
+  recordCodCollectionBatchExpense,
   recordShipmentDeliveredExpenses,
   selectApplicableDeliveryFee,
 } from './shipment-delivered.consumer.js';
@@ -55,7 +56,7 @@ type Fee = {
   id: string;
   shopId: string;
   deliveryCompanyId: string;
-  chargingBasis: 'PER_ORDER' | 'PER_DAY';
+  chargingBasis: 'PER_ORDER' | 'PER_INVOICE';
   amount: Prisma.Decimal;
   currency: string;
   active: boolean;
@@ -66,6 +67,7 @@ type Fee = {
 
 function createDatabase(fees: Fee[]) {
   const expenses = new Map<string, Record<string, unknown>>();
+  const expenseOrderLinks = new Set<string>();
   const journalReferences = new Set<string>();
   const locks = new Map<string, Promise<void>>();
   const feeLookupScopes: Array<{ shopId: string; deliveryCompanyId: string }> = [];
@@ -98,8 +100,9 @@ function createDatabase(fees: Fee[]) {
         const existing = expenses.get(args.where.expenseNo);
         if (existing) return existing;
         expenseCreateCount += 1;
-        expenses.set(args.where.expenseNo, args.create);
-        return args.create;
+        const created = { ...args.create, id: `expense-${expenseCreateCount}` };
+        expenses.set(args.where.expenseNo, created);
+        return created;
       },
     },
     expenseCategory: {
@@ -108,6 +111,16 @@ function createDatabase(fees: Fee[]) {
     journalEntry: {
       findFirst: async (args: { where: { referenceType: string; referenceId: string } }) =>
         journalReferences.has(args.where.referenceId) ? { id: 'journal-1' } : null,
+    },
+    deliveryExpenseOrder: {
+      findMany: async ({ where }: { where: { expenseId: string } }) =>
+        [...expenseOrderLinks]
+          .filter((link) => link.startsWith(`${where.expenseId}:`))
+          .map((link) => ({ orderId: link.slice(where.expenseId.length + 1) })),
+      createMany: async ({ data }: { data: Array<{ expenseId: string; orderId: string }> }) => {
+        data.forEach((row) => expenseOrderLinks.add(`${row.expenseId}:${row.orderId}`));
+        return { count: data.length };
+      },
     },
   };
   const database = {
@@ -146,6 +159,7 @@ function createDatabase(fees: Fee[]) {
     database,
     journalCreator,
     expenses,
+    expenseOrderLinks,
     feeLookupScopes,
     get expenseCreateCount() { return expenseCreateCount; },
     get journalCreateCount() { return journalAmounts.length; },
@@ -289,8 +303,8 @@ test('PER_ORDER charges once per shop, company, and order', async () => {
   assert.equal(expenseTotal(harness.expenses), 300);
 });
 
-test('PER_DAY charges once per shop and company per UTC day', async () => {
-  const harness = createDatabase([fee('per-day-fee', '300.00', 'PER_DAY')]);
+test('shipment delivery events do not invent a PER_INVOICE batch', async () => {
+  const harness = createDatabase([fee('per-invoice-fee', '300.00', 'PER_INVOICE')]);
   await Promise.all(Array.from({ length: 4 }, (_, index) =>
     recordShipmentDeliveredExpenses(
       makeEvent([SHOP_ID], `delivery-${index}`, `order-${index}`),
@@ -303,8 +317,128 @@ test('PER_DAY charges once per shop and company per UTC day', async () => {
     harness.journalCreator,
   );
 
+  assert.equal(harness.expenseCreateCount, 0);
+  assert.equal(expenseTotal(harness.expenses), 0);
+});
+
+test('PER_INVOICE charges the configured fee once and links every order in the COD batch', async () => {
+  const harness = createDatabase([fee('per-invoice-fee', '400.00', 'PER_INVOICE')]);
+  await recordCodCollectionBatchExpense({
+    groupId: 'cod-batch-a',
+    shopId: SHOP_ID,
+    deliveryCompanyId: DELIVERY_COMPANY_ID,
+    orderIds: ['ORD-001', 'ORD-002', 'ORD-003', 'ORD-004', 'ORD-005'],
+    effectiveAt: new Date('2026-10-09T11:00:00.000Z'),
+  }, 'payment-collected-a', harness.database, harness.journalCreator);
+
+  assert.equal(harness.expenseCreateCount, 1);
+  assert.equal(expenseTotal(harness.expenses), 400);
+  assert.equal(harness.expenseOrderLinks.size, 5);
+  assert.deepEqual(
+    [...harness.expenseOrderLinks].map((link) => link.split(':')[1]).sort(),
+    ['ORD-001', 'ORD-002', 'ORD-003', 'ORD-004', 'ORD-005'],
+  );
+  assert.deepEqual([...harness.expenses.values()].map((expense) => expense.currency), ['MMK']);
+  assert.equal(harness.journalCreateCount, 1);
+});
+
+test('distinct PER_INVOICE batches on the same day create separate expenses', async () => {
+  const harness = createDatabase([fee('per-invoice-fee', '400.00', 'PER_INVOICE')]);
+  const effectiveAt = new Date('2026-10-09T11:00:00.000Z');
+  for (const [groupId, orderIds] of [
+    ['cod-batch-a', ['ORD-001', 'ORD-002', 'ORD-003', 'ORD-004', 'ORD-005']],
+    ['cod-batch-b', ['ORD-006', 'ORD-007']],
+  ] as const) {
+    await recordCodCollectionBatchExpense({
+      groupId,
+      shopId: SHOP_ID,
+      deliveryCompanyId: DELIVERY_COMPANY_ID,
+      orderIds: [...orderIds],
+      effectiveAt,
+    }, `${groupId}-event`, harness.database, harness.journalCreator);
+  }
+
   assert.equal(harness.expenseCreateCount, 2);
-  assert.equal(expenseTotal(harness.expenses), 600);
+  assert.equal(expenseTotal(harness.expenses), 800);
+  assert.equal(harness.expenseOrderLinks.size, 7);
+});
+
+test('duplicate and concurrent PER_INVOICE events create one expense and journal', async () => {
+  const harness = createDatabase([fee('per-invoice-fee', '400.00', 'PER_INVOICE')]);
+  const input = {
+    groupId: 'cod-batch-repeat',
+    shopId: SHOP_ID,
+    deliveryCompanyId: DELIVERY_COMPANY_ID,
+    orderIds: ['ORD-001', 'ORD-002', 'ORD-003', 'ORD-004', 'ORD-005'],
+    effectiveAt: new Date('2026-10-09T11:00:00.000Z'),
+  };
+  await Promise.all(Array.from({ length: 4 }, () =>
+    recordCodCollectionBatchExpense(input, 'same-batch-event', harness.database, harness.journalCreator)));
+
+  assert.equal(harness.expenseCreateCount, 1);
+  assert.equal(expenseTotal(harness.expenses), 400);
+  assert.equal(harness.expenseOrderLinks.size, 5);
+  assert.equal(harness.journalCreateCount, 1);
+});
+
+test('a replayed batch ID cannot add unrelated orders to an existing expense', async () => {
+  const harness = createDatabase([fee('per-invoice-fee', '400.00', 'PER_INVOICE')]);
+  const baseInput = {
+    groupId: 'cod-batch-fixed-membership',
+    shopId: SHOP_ID,
+    deliveryCompanyId: DELIVERY_COMPANY_ID,
+    orderIds: ['ORD-001', 'ORD-002'],
+    effectiveAt: new Date('2026-10-09T11:00:00.000Z'),
+  };
+  await recordCodCollectionBatchExpense(baseInput, 'initial-event', harness.database, harness.journalCreator);
+
+  await assert.rejects(
+    recordCodCollectionBatchExpense({ ...baseInput, orderIds: ['ORD-001', 'ORD-003'] }, 'mismatched-event', harness.database, harness.journalCreator),
+    /different order membership/,
+  );
+  assert.equal(harness.expenseCreateCount, 1);
+  assert.deepEqual([...harness.expenseOrderLinks].map((link) => link.split(':')[1]).sort(), ['ORD-001', 'ORD-002']);
+  assert.equal(harness.journalCreateCount, 1);
+});
+
+test('PER_INVOICE expense identity isolates shops and delivery providers', async () => {
+  const harness = createDatabase([
+    fee('shop-1-provider-1', '400.00', 'PER_INVOICE', null, null, SHOP_ID, DELIVERY_COMPANY_ID),
+    fee('shop-2-provider-1', '500.00', 'PER_INVOICE', null, null, 'shop-2', DELIVERY_COMPANY_ID),
+    fee('shop-1-provider-2', '600.00', 'PER_INVOICE', null, null, SHOP_ID, 'company-other'),
+  ]);
+  const effectiveAt = new Date('2026-10-09T11:00:00.000Z');
+  for (const [shopId, deliveryCompanyId, orderId] of [
+    [SHOP_ID, DELIVERY_COMPANY_ID, 'ORD-001'],
+    ['shop-2', DELIVERY_COMPANY_ID, 'ORD-002'],
+    [SHOP_ID, 'company-other', 'ORD-003'],
+  ]) {
+    await recordCodCollectionBatchExpense({
+      groupId: 'stable-group-token',
+      shopId,
+      deliveryCompanyId,
+      orderIds: [orderId],
+      effectiveAt,
+    }, `${orderId}-event`, harness.database, harness.journalCreator);
+  }
+
+  assert.equal(harness.expenseCreateCount, 3);
+  assert.equal(expenseTotal(harness.expenses), 1500);
+});
+
+test('PER_ORDER remains shipment-triggered and is not repriced by COD batch time', async () => {
+  const harness = createDatabase([fee('per-order-fee', '80.00', 'PER_ORDER')]);
+  await recordCodCollectionBatchExpense({
+    groupId: 'cod-batch-per-order',
+    shopId: SHOP_ID,
+    deliveryCompanyId: DELIVERY_COMPANY_ID,
+    orderIds: ['ORD-001', 'ORD-002', 'ORD-003', 'ORD-004', 'ORD-005'],
+    effectiveAt: new Date('2026-10-09T11:00:00.000Z'),
+  }, 'per-order-event', harness.database, harness.journalCreator);
+
+  assert.equal(harness.expenseCreateCount, 0);
+  assert.equal(expenseTotal(harness.expenses), 0);
+  assert.equal(harness.expenseOrderLinks.size, 0);
 });
 
 test('customer shipping charge remains separate from Delivery Company expense', async () => {
@@ -324,7 +458,10 @@ test('expense references include the shop and Delivery Company identity', () => 
   const companySpecificInput = { ...input, deliveryCompanyId: 'another-company' };
 
   assert.match(buildDeliveryExpenseReference('PER_ORDER', input), /^DELI-ORDER-/);
-  assert.match(buildDeliveryExpenseReference('PER_DAY', input), /^DELI-DAY-/);
+  assert.match(
+    buildDeliveryExpenseReference('PER_INVOICE', { ...input, deliveryExpenseGroupId: 'batch-1' }),
+    /^DELI-INVOICE-/,
+  );
   assert.notEqual(
     buildDeliveryExpenseReference('PER_ORDER', input),
     buildDeliveryExpenseReference('PER_ORDER', companySpecificInput),

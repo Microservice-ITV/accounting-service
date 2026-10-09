@@ -35,7 +35,7 @@ enum ExpenseScope {
 
 enum DeliveryChargingBasis {
   PER_ORDER
-  PER_DAY
+  PER_INVOICE
 }
 
 model AccountingStatus {
@@ -132,11 +132,14 @@ model Expense {
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
   submittedAt        DateTime?
+  deliveryExpenseGroupId String?
 
   expenseType      ExpenseCategory   @relation(fields: [expenseTypeId], references: [id], onDelete: Restrict)
   approvals        ExpenseApproval[]
+  deliveryOrders   DeliveryExpenseOrder[]
   statusDefinition AccountingStatus  @relation("ExpenseStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
 
+  @@unique([deliveryExpenseGroupId, shopId, deliveryCompanyId], map: "expenses_delivery_group_shop_company_key")
   @@index([shopId, status])
   @@index([deliveryCompanyId])
   @@index([scope, status])
@@ -144,6 +147,19 @@ model Expense {
   @@index([sellerUserId, status])
   @@index([status, expenseDate])
   @@index([statusDomain, status])
+}
+
+model DeliveryExpenseOrder {
+  id        String   @id @default(cuid())
+  expenseId String
+  orderId   String
+  createdAt DateTime @default(now())
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, orderId])
+  @@index([orderId])
+  @@map("delivery_expense_orders")
 }
 
 model ApprovalPolicy {

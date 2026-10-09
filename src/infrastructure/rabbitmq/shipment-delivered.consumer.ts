@@ -57,6 +57,7 @@ export type DeliveryExpenseInput = {
   shopId: string;
   expenseDate: Date;
   description: string;
+  deliveryExpenseGroupId?: string;
 };
 
 export function buildShipmentDeliveredExpense(event: ShipmentDeliveredEvent): DeliveryExpenseInput {
@@ -142,24 +143,31 @@ export function selectApplicableDeliveryFee(
 }
 
 export function buildDeliveryExpenseReference(
-  chargingBasis: 'PER_ORDER' | 'PER_DAY',
-  input: Pick<DeliveryExpenseInput, 'deliveryCompanyId' | 'shopId' | 'orderId' | 'expenseDate'>,
+  chargingBasis: 'PER_ORDER' | 'PER_INVOICE',
+  input: Pick<DeliveryExpenseInput, 'deliveryCompanyId' | 'shopId' | 'orderId' | 'deliveryExpenseGroupId'>,
 ): string {
   if (!input.deliveryCompanyId) {
     throw new PermanentShipmentDeliveredEventError('Delivery Company ID is required for a canonical expense reference');
   }
   const chargeKey = chargingBasis === 'PER_ORDER'
     ? [input.shopId, input.deliveryCompanyId, input.orderId]
-    : [input.shopId, input.deliveryCompanyId, input.expenseDate.toISOString().slice(0, 10)];
+    : input.deliveryExpenseGroupId
+      ? [input.shopId, input.deliveryCompanyId, input.deliveryExpenseGroupId]
+      : null;
+  if (!chargeKey) {
+    throw new PermanentShipmentDeliveredEventError('Delivery expense group ID is required for PER_INVOICE charging');
+  }
   const digest = createHash('sha256').update(JSON.stringify(chargeKey)).digest('hex');
-  return `DELI-${chargingBasis === 'PER_ORDER' ? 'ORDER' : 'DAY'}-${digest}`;
+  return `DELI-${chargingBasis === 'PER_ORDER' ? 'ORDER' : 'INVOICE'}-${digest}`;
 }
 
 function getCandidateDeliveryExpenseReferences(input: DeliveryExpenseInput): string[] {
   return [
     `DELI-${input.deliveryId}`,
     buildDeliveryExpenseReference('PER_ORDER', input),
-    buildDeliveryExpenseReference('PER_DAY', input),
+    ...(input.deliveryExpenseGroupId
+      ? [buildDeliveryExpenseReference('PER_INVOICE', input)]
+      : []),
   ];
 }
 
@@ -206,6 +214,7 @@ export async function recordShipmentDeliveredExpenses(
 
     if (!expense) {
       const fee = await findApplicableDeliveryFee(tx, input, input.expenseDate);
+      if (fee.chargingBasis === 'PER_INVOICE') return;
       const expenseNo = buildDeliveryExpenseReference(fee.chargingBasis, input);
 
       await tx.$executeRaw`
@@ -274,6 +283,119 @@ export async function recordShipmentDeliveredExpenses(
           amount: Number(expense.amount),
           memo: 'Deli paid',
         },
+      ],
+    }, tx);
+  });
+}
+
+export type DeliveryExpenseBatchInput = {
+  groupId: string;
+  shopId: string;
+  deliveryCompanyId: string;
+  orderIds: string[];
+  effectiveAt: Date;
+};
+
+export async function recordCodCollectionBatchExpense(
+  input: DeliveryExpenseBatchInput,
+  eventId: string,
+  database: Pick<typeof prisma, '$transaction'> = prisma,
+  journalCreator: typeof createJournalEntryInTransaction = createJournalEntryInTransaction,
+): Promise<void> {
+  const normalizedOrderIds = input.orderIds.map((orderId) => orderId.trim());
+  const orderIds = [...new Set(normalizedOrderIds)];
+  if (
+    !input.groupId.trim()
+    || !input.shopId.trim()
+    || !input.deliveryCompanyId.trim()
+    || orderIds.length === 0
+    || orderIds.length !== normalizedOrderIds.length
+    || normalizedOrderIds.some((orderId) => !orderId)
+  ) {
+    throw new PermanentShipmentDeliveredEventError('Collect COD delivery expense requires a group, shop, provider, and orders');
+  }
+
+  const expenseRepository = new ExpenseRepository();
+  await database.$transaction(async (tx) => {
+    const feeLookupInput: DeliveryExpenseInput = {
+      orderId: orderIds[0],
+      deliveryId: input.groupId,
+      deliveryNumber: input.groupId,
+      deliveryCompanyId: input.deliveryCompanyId,
+      shopId: input.shopId,
+      expenseDate: input.effectiveAt,
+      description: `Delivery expense for Collect COD batch ${input.groupId}`,
+      deliveryExpenseGroupId: input.groupId,
+    };
+    const fee = await findApplicableDeliveryFee(tx, feeLookupInput, input.effectiveAt);
+    if (fee.chargingBasis === 'PER_ORDER') return;
+
+    const expenseNo = buildDeliveryExpenseReference(fee.chargingBasis, feeLookupInput);
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext('accounting.delivery-expense'),
+        hashtext(${expenseNo})
+      )
+    `;
+
+    let expense = await tx.expense.findUnique({ where: { expenseNo } });
+    if (!expense) {
+      const category = await tx.expenseCategory.upsert({
+        where: { code: 'DELI' },
+        update: { name: 'Deli', description: 'Shop-paid delivery-company expense' },
+        create: {
+          code: 'DELI',
+          name: 'Deli',
+          description: 'Shop-paid delivery-company expense',
+        },
+        select: { id: true },
+      });
+
+      expense = await expenseRepository.upsertExpense({
+        expenseNo,
+        scope: 'SHOP',
+        shopId: input.shopId,
+        deliveryCompanyId: input.deliveryCompanyId,
+        deliveryExpenseGroupId: input.groupId,
+        expenseTypeId: category.id,
+        expenseAccountCode: '5000',
+        fundingAccountCode: '1000',
+        amount: fee.amount,
+        currency: fee.currency,
+        description: `${feeLookupInput.description} (company ${input.deliveryCompanyId}; ${fee.chargingBasis})`,
+        expenseDate: input.effectiveAt,
+        status: 'APPROVED',
+      }, tx);
+    }
+
+    const existingOrderLinks = await tx.deliveryExpenseOrder.findMany({
+      where: { expenseId: expense.id },
+      select: { orderId: true },
+    });
+    if (existingOrderLinks.length > 0) {
+      const existingOrderIds = existingOrderLinks.map((link) => link.orderId).sort();
+      if (JSON.stringify(existingOrderIds) !== JSON.stringify(orderIds)) {
+        throw new PermanentShipmentDeliveredEventError(
+          `Collect COD batch ${input.groupId} was replayed with different order membership`,
+        );
+      }
+    } else {
+      await tx.deliveryExpenseOrder.createMany({
+        data: orderIds.map((orderId) => ({ expenseId: expense.id, orderId })),
+        skipDuplicates: true,
+      });
+    }
+
+    if (await expenseRepository.findJournalByExpenseReference(expenseNo, tx)) return;
+    await journalCreator({
+      referenceType: 'EXPENSE',
+      referenceId: expenseNo,
+      eventId,
+      narration: `Deli - ${expense.description ?? feeLookupInput.description}`,
+      entryDate: expense.expenseDate,
+      lines: [
+        { accountCode: '5000', direction: 'DEBIT', amount: Number(expense.amount), memo: 'Deli' },
+        { accountCode: '1000', direction: 'CREDIT', amount: Number(expense.amount), memo: 'Deli paid' },
       ],
     }, tx);
   });
