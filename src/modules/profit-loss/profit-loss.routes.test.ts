@@ -416,7 +416,7 @@ test('currency totals are not combined when transactions use different currencie
     ...emptyData(),
     salesProjections: [
       sales({ currency: 'MMK' }),
-      sales({ shopId: 'shop-1', currency: 'MMK' }),
+      sales({ shopId: 'shop-1', currency: 'USD' }),
     ],
   });
 

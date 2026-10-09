@@ -20,7 +20,7 @@ const router = Router();
 const feeRuleSchema = z.object({
   shopId: z.string().trim().min(1).max(64),
   deliveryCompanyId: z.string().trim().min(1),
-  chargingBasis: z.enum(['PER_ORDER', 'PER_DAY']),
+  chargingBasis: z.enum(['PER_ORDER', 'PER_INVOICE']),
   amount: z.union([
     z.string().trim(),
     z.number().finite().transform(String),

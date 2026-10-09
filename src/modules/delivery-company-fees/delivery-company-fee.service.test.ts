@@ -24,7 +24,7 @@ const seller: AuthenticatedExpenseContext = {
 const input = {
   shopId: SHOP_ID,
   deliveryCompanyId: COMPANY_ID,
-  chargingBasis: 'PER_DAY' as const,
+  chargingBasis: 'PER_INVOICE' as const,
   amount: '300.00',
   currency: 'MMK',
   active: true,
@@ -82,7 +82,7 @@ test('creates a fee rule using only shop and canonical company identity', async 
   const args = calls[0].args as { data: { shopId: string; deliveryCompanyId: string; amount: Prisma.Decimal; chargingBasis: string } };
   assert.equal(args.data.shopId, SHOP_ID);
   assert.equal(args.data.deliveryCompanyId, COMPANY_ID);
-  assert.equal(args.data.chargingBasis, 'PER_DAY');
+  assert.equal(args.data.chargingBasis, 'PER_INVOICE');
   assert.equal(args.data.amount.toString(), '300');
 });
 

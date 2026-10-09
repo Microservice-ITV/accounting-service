@@ -5,7 +5,7 @@ import prisma from '../../lib/prisma.js';
 export type DeliveryCompanyFeeInput = {
   shopId: string;
   deliveryCompanyId: string;
-  chargingBasis: 'PER_ORDER' | 'PER_DAY';
+  chargingBasis: 'PER_ORDER' | 'PER_INVOICE';
   amount: string;
   currency: string;
   active: boolean;

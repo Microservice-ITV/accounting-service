@@ -3,6 +3,10 @@ import { z } from 'zod';
 import prisma from '../../lib/prisma.js';
 import { createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
 import { config } from '../../config/index.js';
+import {
+  PermanentShipmentDeliveredEventError,
+  recordCodCollectionBatchExpense,
+} from './shipment-delivered.consumer.js';
 
 const shopBreakdownLineSchema = z.object({
   shop_id: z.string().min(1).optional(),
@@ -42,6 +46,13 @@ const paymentCollectedSchema = z.object({
       shop_id: z.string().min(1),
       gross_amount: z.number().finite().nonnegative(),
     }).passthrough()).min(1),
+    delivery_expense_group: z.object({
+      group_id: z.string().min(1),
+      shop_id: z.string().min(1),
+      delivery_company_id: z.string().min(1),
+      order_ids: z.array(z.string().min(1)).min(1),
+      effective_at: z.string().datetime({ offset: true }),
+    }).optional(),
   }).passthrough(),
 });
 
@@ -461,14 +472,13 @@ let connection: ChannelModel | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let shuttingDown = false;
 
-const isPermanentError = (error: unknown): boolean => {
-  if (error instanceof z.ZodError || error instanceof SyntaxError) {
+export const isPermanentError = (error: unknown): boolean => {
+  if (error instanceof z.ZodError || error instanceof SyntaxError || error instanceof PermanentShipmentDeliveredEventError) {
     return true;
   }
 
   const message = error instanceof Error ? error.message : '';
-  return message.startsWith('Unknown account codes:')
-    || message.startsWith('Journal entry is out of balance:')
+  return message.startsWith('Journal entry is out of balance:')
     || message.startsWith('COD payment requires shop allocations')
     || message.startsWith('COD payment requires unique shop allocations')
     || message.startsWith('COD payment allocation total does not match payment amount')
@@ -479,11 +489,6 @@ const isPermanentError = (error: unknown): boolean => {
     || message.startsWith('Payment income contains invalid shop sales or shipping allocations')
     || message.startsWith('Payment requires positive shop allocations');
 };
-
-const isDuplicateEvent = (error: unknown): boolean => {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
-};
-
 
 const scheduleReconnect = () => {
   if (shuttingDown || reconnectTimer) {
@@ -652,16 +657,93 @@ const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
   });
 };
 
-const processPaymentCollected = async (event: PaymentCollectedEvent): Promise<void> => {
+export type PaymentCollectedProcessorDependencies = {
+  isAlreadyProcessed: (paymentId: string, eventId: string, journalEventId: string) => Promise<boolean>;
+  getRevenueAllocations: typeof getOrderShopRevenueAllocations;
+  recordBatchExpense: typeof recordCodCollectionBatchExpense;
+  saveJournal: typeof savePaymentJournal;
+  saveSettlement: typeof savePaymentSettlement;
+};
+
+export function buildCollectedPaymentJournalEventId(paymentId: string, eventId: string): string {
+  return `payment.collected:${paymentId}:${eventId}`;
+}
+
+async function isCollectedPaymentAlreadyProcessed(
+  paymentId: string,
+  eventId: string,
+  journalEventId: string,
+): Promise<boolean> {
+  const [journal, settlement] = await Promise.all([
+    prisma.journalEntry.findFirst({
+      where: { referenceType: 'PAYMENT', referenceId: paymentId },
+      select: { eventId: true },
+    }),
+    prisma.paymentSettlement.findUnique({
+      where: { paymentReference: paymentId },
+      select: { eventId: true },
+    }),
+  ]);
+
+  return (
+    (journal?.eventId === eventId || journal?.eventId === journalEventId)
+    && settlement?.eventId === eventId
+  );
+}
+
+const collectedPaymentProcessorDependencies: PaymentCollectedProcessorDependencies = {
+  isAlreadyProcessed: isCollectedPaymentAlreadyProcessed,
+  getRevenueAllocations: getOrderShopRevenueAllocations,
+  recordBatchExpense: recordCodCollectionBatchExpense,
+  saveJournal: savePaymentJournal,
+  saveSettlement: savePaymentSettlement,
+};
+
+export const processPaymentCollected = async (
+  event: PaymentCollectedEvent,
+  dependencies: PaymentCollectedProcessorDependencies = collectedPaymentProcessorDependencies,
+): Promise<void> => {
+  const paymentJournalEventId = buildCollectedPaymentJournalEventId(
+    event.data.payment_id,
+    event.event_id,
+  );
+  if (await dependencies.isAlreadyProcessed(
+    event.data.payment_id,
+    event.event_id,
+    paymentJournalEventId,
+  )) {
+    return;
+  }
+
   if (!event.data.order_id) {
+    if (event.data.delivery_expense_group) {
+      throw new PermanentShipmentDeliveredEventError('Collect COD batch event is missing its order ID');
+    }
     throw new Error('COD payment income requires an order sales projection');
   }
 
-  const revenueAllocations = await getOrderShopRevenueAllocations(event.data.order_id);
+  const revenueAllocations = await dependencies.getRevenueAllocations(event.data.order_id);
   if (revenueAllocations.length === 0) {
     throw new Error(`Order sales projection missing for collected COD payment ${event.data.payment_id}`);
   }
   validateCollectedShopAllocations(event, revenueAllocations);
+
+  const expenseGroup = event.data.delivery_expense_group;
+  if (expenseGroup) {
+    if (
+      !expenseGroup.order_ids.includes(event.data.order_id)
+      || !event.data.shop_breakdown.some((row) => row.shop_id === expenseGroup.shop_id)
+    ) {
+      throw new PermanentShipmentDeliveredEventError('Collect COD event does not match its shop and batch order attribution');
+    }
+    await dependencies.recordBatchExpense({
+      groupId: expenseGroup.group_id,
+      shopId: expenseGroup.shop_id,
+      deliveryCompanyId: expenseGroup.delivery_company_id,
+      orderIds: expenseGroup.order_ids,
+      effectiveAt: new Date(expenseGroup.effective_at),
+    }, event.event_id);
+  }
 
   const paymentContext: PaymentJournalContext = {
     payment_id: event.data.payment_id,
@@ -670,17 +752,17 @@ const processPaymentCollected = async (event: PaymentCollectedEvent): Promise<vo
     amount: event.data.amount,
     currency: event.data.currency,
   };
-  await savePaymentJournal({
+  await dependencies.saveJournal({
     referenceType: 'PAYMENT',
     referenceId: event.data.payment_id,
-    eventId: event.event_id,
+    eventId: paymentJournalEventId,
     narration: event.data.order_id
       ? `Collected COD payment for order ${event.data.order_id}`
       : 'Collected COD payment',
     lines: buildCollectedPaymentJournalLines(paymentContext, revenueAllocations),
   });
 
-  await savePaymentSettlement({
+  await dependencies.saveSettlement({
     paymentId: event.data.payment_id,
     orderId: event.data.order_id,
     checkoutId: event.data.checkout_id,
@@ -728,12 +810,6 @@ const consumeMessages = async (activeChannel: Channel): Promise<void> => {
       await processPaymentEvent(message);
       activeChannel.ack(message);
     } catch (error) {
-      if (isDuplicateEvent(error)) {
-        activeChannel.ack(message);
-        console.log('Duplicate payment event ignored');
-        return;
-      }
-
       console.error('Failed to process payment event', error);
       activeChannel.nack(message, false, !isPermanentError(error));
     }

@@ -12,9 +12,9 @@ services:
       - ./.env
     environment:
       PORT: 4005
-      RUN_MIGRATIONS: "false"
-      RUN_SEED: "false"
-      ACCOUNTING_ENABLE_SEED: "false"
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      RUN_SEED: ${RUN_SEED:-true}
+      ACCOUNTING_ENABLE_SEED: ${ACCOUNTING_ENABLE_SEED:-true}
       AUTH_SERVICE_BASE_URL: http://authservice-nginx/api/v1
       SHIPPING_SERVICE_BASE_URL: ${SHIPPING_SERVICE_BASE_URL:-http://shippingservice-nginx/shipping}
       DATABASE_URL: postgresql://postgres:postgres@accounting-db:5432/accounting_service?schema=public
