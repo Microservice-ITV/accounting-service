@@ -33,6 +33,8 @@ COMPOSE_FILE="$DEPLOY_DIR/docker-compose.prod.yml"
 NETWORK_NAME="itv-network"
 NGINX_CONTAINER="microservices-gateway"
 NGINX_UPSTREAM_FILE="$GATEWAY_NGINX_DIR/accounting-service-upstream.conf"
+NGINX_UPSTREAM_BLOCK="accounting_service_backend"
+NGINX_UPSTREAM_PORT="4005"
 STAGING_PROJECT="accounting-staging"
 PRODUCTION_PROJECT="accounting-service-prod"
 LOCK_FILE="/tmp/accounting-service-deploy.lock"
@@ -171,15 +173,20 @@ validate_environment() {
         return 0
     fi
 
-    if [[ ! -d "$GATEWAY_NGINX_DIR" ]]; then
-        error "Gateway Nginx directory not found:"
-        echo "   $GATEWAY_NGINX_DIR"
-        return 1
-    fi
-
     if ! docker container inspect "$NGINX_CONTAINER" >/dev/null 2>&1; then
         error "Gateway container not found:"
         echo "   $NGINX_CONTAINER"
+        return 1
+    fi
+
+    if ! docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1; then
+        error "Gateway Nginx configuration is not loadable inside $NGINX_CONTAINER."
+        return 1
+    fi
+
+    if [[ -z "$(nginx_dump_config | extract_upstream_target)" ]]; then
+        error "Gateway has no resolvable accounting upstream."
+        echo "   Expected an 'upstream accounting_service_backend' block in $NGINX_CONTAINER."
         return 1
     fi
 
@@ -403,16 +410,11 @@ wait_for_container_health() {
 get_active_container() {
     local active=""
 
-    if [[ ! -f "$NGINX_UPSTREAM_FILE" ]]; then
-        error "Production upstream file does not exist:"
-        echo "   $NGINX_UPSTREAM_FILE"
-        return 1
-    fi
-
-    active="$(sed -n 's/^[[:space:]]*server[[:space:]]\+\([^:;[:space:]]*\):4005;.*/\1/p' "$NGINX_UPSTREAM_FILE" | head -n 1)"
+    active="$(nginx_dump_config | extract_upstream_target || true)"
 
     if [[ -z "$active" ]]; then
-        error "Unable to determine active production container from Nginx upstream."
+        error "Unable to determine active production container from Nginx active configuration."
+        echo "   Expected an 'upstream $NGINX_UPSTREAM_BLOCK' block in $NGINX_CONTAINER."
         return 1
     fi
 
@@ -448,23 +450,102 @@ get_new_container() {
 }
 
 # ============================================================
-# NGINX CONFIGURATION
+# NGINX ACTIVE CONFIGURATION (SOURCE OF TRUTH)
 # ============================================================
-write_upstream_file() {
-    local container="$1"
-    local target_file="$2"
+# The gateway runs in a separate container ("microservices-gateway")
+# whose Nginx loads the accounting upstream from a mounted include
+# file. The authoritative view of what Nginx actually serves is its
+# active configuration (nginx -T), NOT a host-side file that may or may
+# not be mounted. Every read/write below therefore goes through the
+# container, so the file we edit is exactly the file Nginx loads.
 
-    cat > "$target_file" <<EOF
-upstream accounting_service_backend {
-    server ${container}:4005;
+# Dump the full active Nginx configuration from the gateway container.
+nginx_dump_config() {
+    docker exec "$NGINX_CONTAINER" nginx -T 2>/dev/null
+}
+
+# Parse Nginx configuration text and print the server target (host part
+# only) declared inside the accounting upstream block.
+extract_upstream_target() {
+    awk -v block="$NGINX_UPSTREAM_BLOCK" '
+        $0 ~ ("upstream[[:space:]]+" block) { inblk = 1; next }
+        inblk && /}/ { inblk = 0; next }
+        inblk {
+            if (match($0, /server[[:space:]]+[^;[:space:]]+:[0-9]+/)) {
+                target = substr($0, RSTART, RLENGTH)
+                sub(/^server[[:space:]]+/, "", target)
+                sub(/:[0-9]+$/, "", target)
+                print target
+                exit
+            }
+        }
+    '
+}
+
+# Determine the exact file path (inside the container) that Nginx loads
+# the accounting upstream from, based on the active configuration.
+nginx_upstream_file_path() {
+    local config
+    config="$(nginx_dump_config)" || return 1
+
+    printf '%s\n' "$config" | awk -v block="$NGINX_UPSTREAM_BLOCK" '
+        /^# configuration file / { path = $4; sub(/:$/, "", path); next }
+        $0 ~ ("upstream[[:space:]]+" block) { print path; found = 1; exit }
+        END { if (!found) exit 1 }
+    '
+}
+
+# Render the upstream include file content for the given container.
+render_upstream_file() {
+    local container="$1"
+
+    cat <<EOF
+upstream ${NGINX_UPSTREAM_BLOCK} {
+    server ${container}:${NGINX_UPSTREAM_PORT};
 }
 EOF
 }
 
+write_upstream_file() {
+    local container="$1"
+    local target_file="$2"
+
+    render_upstream_file "$container" > "$target_file"
+}
+
+# Read the current content of the Nginx-loaded upstream file into a
+# backup file on the host.
+nginx_upstream_file_backup() {
+    local target_file="$1"
+    local backup_file="$2"
+
+    docker exec "$NGINX_CONTAINER" cat "$target_file" > "$backup_file" 2>/dev/null || : > "$backup_file"
+}
+
+# Write host file content into the Nginx-loaded upstream file inside the
+# container.
+nginx_upstream_file_restore() {
+    local target_file="$1"
+    local source_file="$2"
+
+    docker exec -i "$NGINX_CONTAINER" sh -c "cat > '$target_file'" < "$source_file"
+}
+
 switch_nginx() {
     local new_container="$1"
+    local target_file
     local previous_file
     local temporary_file
+
+    # Discover the exact file Nginx actually loads the upstream from.
+    # Writing to any other path would leave the running gateway unchanged.
+    if ! target_file="$(nginx_upstream_file_path)"; then
+        error "Unable to locate the accounting upstream file inside $NGINX_CONTAINER."
+        echo "   Expected an 'upstream $NGINX_UPSTREAM_BLOCK' block in the active configuration."
+        return 1
+    fi
+
+    echo "ℹ️ Nginx loads accounting upstream from: $target_file"
 
     previous_file="$(mktemp)"
     temporary_file="$(mktemp)"
@@ -473,35 +554,45 @@ switch_nginx() {
         rm -f "$previous_file" "$temporary_file"
     }
 
-    if [[ -f "$NGINX_UPSTREAM_FILE" ]]; then
-        cp "$NGINX_UPSTREAM_FILE" "$previous_file"
-    else
-        : > "$previous_file"
-    fi
+    # Backup the currently loaded upstream file content.
+    nginx_upstream_file_backup "$target_file" "$previous_file"
 
+    # Write the new upstream into the file Nginx actually loads.
     write_upstream_file "$new_container" "$temporary_file"
-    cp "$temporary_file" "$NGINX_UPSTREAM_FILE"
 
-    if ! docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1; then
-        error "Nginx configuration validation failed."
+    if ! nginx_upstream_file_restore "$target_file" "$temporary_file"; then
+        error "Failed to write upstream file inside $NGINX_CONTAINER: $target_file"
 
         if [[ -s "$previous_file" ]]; then
-            cp "$previous_file" "$NGINX_UPSTREAM_FILE"
-        else
-            : > "$NGINX_UPSTREAM_FILE"
+            nginx_upstream_file_restore "$target_file" "$previous_file" || true
         fi
 
         cleanup_switch_files
         return 1
     fi
 
+    # Validate the new configuration before reloading.
+    if ! docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1; then
+        error "Nginx configuration validation failed."
+
+        if [[ -s "$previous_file" ]]; then
+            nginx_upstream_file_restore "$target_file" "$previous_file" || true
+        fi
+
+        if docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1; then
+            docker exec "$NGINX_CONTAINER" nginx -s reload >/dev/null 2>&1 || true
+        fi
+
+        cleanup_switch_files
+        return 1
+    fi
+
+    # Reload Nginx to apply the new upstream.
     if ! docker exec "$NGINX_CONTAINER" nginx -s reload >/dev/null 2>&1; then
         error "Nginx reload failed."
 
         if [[ -s "$previous_file" ]]; then
-            cp "$previous_file" "$NGINX_UPSTREAM_FILE"
-        else
-            : > "$NGINX_UPSTREAM_FILE"
+            nginx_upstream_file_restore "$target_file" "$previous_file" || true
         fi
 
         if docker exec "$NGINX_CONTAINER" nginx -t >/dev/null 2>&1; then
@@ -513,45 +604,64 @@ switch_nginx() {
     fi
 
     cleanup_switch_files
+    success "Nginx reloaded; accounting upstream switched to $new_container."
     return 0
 }
-
 
 # ============================================================
 # VERIFY NGINX UPSTREAM
 # ============================================================
+# Verification is based on the gateway's ACTIVE configuration
+# (nginx -T) plus the health and reachability of the expected
+# container. This is the same source of truth used by switch_nginx,
+# so a successful switch is guaranteed to be observed here.
 verify_nginx_upstream() {
     local expected_container="$1"
-    local actual_container=""
     local nginx_config=""
+    local actual_container=""
 
-    # Verify the host upstream file
-    actual_container="$(sed -n 's/^[[:space:]]*server[[:space:]]\+\([^:;[:space:]]*\):4005;.*/\1/p' "$NGINX_UPSTREAM_FILE" | head -n 1)"
+    # Capture the full active Nginx configuration before searching it.
+    # This avoids grep -q closing the pipe early when pipefail is enabled.
+    if ! nginx_config="$(nginx_dump_config)"; then
+        error "Failed to read active Nginx configuration from $NGINX_CONTAINER."
+        return 1
+    fi
+
+    # Extract the upstream target Nginx is actually serving from the
+    # active configuration (not from any host-side file).
+    actual_container="$(printf '%s\n' "$nginx_config" | extract_upstream_target || true)"
 
     if [[ "$actual_container" != "$expected_container" ]]; then
         error "Nginx upstream verification failed."
         echo "   Expected: $expected_container"
         echo "   Actual  : ${actual_container:-none}"
-        return 1
-    fi
-
-    # Capture the full active Nginx configuration before searching it.
-    # This avoids grep -q closing the pipe early when pipefail is enabled.
-    if ! nginx_config="$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1)"; then
-        error "Failed to read active Nginx configuration."
-        printf '%s\n' "$nginx_config"
-        return 1
-    fi
-
-    if ! grep -Fq -- "server ${expected_container}:4005;" <<< "$nginx_config"; then
-        error "Gateway does not contain expected upstream:"
-        echo "   ${expected_container}:4005"
         echo "Active accounting upstream configuration:"
-        grep -A3 -B1 'upstream accounting_service_backend' <<< "$nginx_config" || true
+        grep -A3 -B1 "upstream ${NGINX_UPSTREAM_BLOCK}" <<< "$nginx_config" || true
         return 1
     fi
 
-    success "Nginx upstream points to $expected_container."
+    # Confirm the exact upstream directive is present.
+    if ! grep -Fq -- "server ${expected_container}:${NGINX_UPSTREAM_PORT};" <<< "$nginx_config"; then
+        error "Gateway active configuration is missing the expected upstream directive:"
+        echo "   server ${expected_container}:${NGINX_UPSTREAM_PORT};"
+        return 1
+    fi
+
+    # Confirm the expected container is healthy.
+    if [[ "$(container_health "$expected_container")" != "healthy" ]]; then
+        error "Expected upstream container is not healthy: $expected_container"
+        return 1
+    fi
+
+    # Confirm the gateway can actually reach the expected container.
+    if ! docker exec "$NGINX_CONTAINER" curl -fsS --max-time 10 \
+            "http://${expected_container}:${NGINX_UPSTREAM_PORT}${HEALTH_PATH}" >/dev/null 2>&1; then
+        error "Gateway cannot reach expected upstream container:"
+        echo "   http://${expected_container}:${NGINX_UPSTREAM_PORT}${HEALTH_PATH}"
+        return 1
+    fi
+
+    success "Nginx upstream verified: ${expected_container}:${NGINX_UPSTREAM_PORT} (healthy and reachable)."
     return 0
 }
 
@@ -636,6 +746,7 @@ cleanup_old_accounting_images() {
 # ============================================================
 production_failure_cleanup() {
     local exit_code="${1:-1}"
+    local rollback_verified=0
 
     if [[ "$FAILURE_CLEANUP_RUNNING" -eq 1 ]]; then
         return 0
@@ -656,9 +767,11 @@ production_failure_cleanup() {
             if switch_nginx "$CURRENT_CONTAINER"; then
                 if verify_nginx_upstream "$CURRENT_CONTAINER"; then
                     PRODUCTION_SWITCHED=0
+                    rollback_verified=1
                     success "Production traffic restored."
                 else
                     error "CRITICAL: Nginx rollback verification failed."
+                    error "Manual intervention may be required."
                 fi
             else
                 error "CRITICAL: Nginx rollback failed."
@@ -668,10 +781,23 @@ production_failure_cleanup() {
             error "Previous production container is unavailable."
             error "Automatic traffic rollback is not possible."
         fi
+    else
+        # Traffic was never switched to the new container, so there is
+        # nothing to roll back and removing the new container is safe.
+        rollback_verified=1
     fi
 
+    # Only remove the new container once the previously healthy production
+    # service is confirmed to be serving traffic again (or was never
+    # switched). Never remove a container while Nginx may still point to
+    # it, otherwise we would tear down the working service.
     if [[ -n "$NEW_CONTAINER" ]] && [[ "$NEW_CONTAINER" != "$CURRENT_CONTAINER" ]]; then
-        remove_container "$NEW_CONTAINER"
+        if [[ "$rollback_verified" -eq 1 ]]; then
+            remove_container "$NEW_CONTAINER"
+        else
+            warning "Keeping $NEW_CONTAINER because rollback could not be verified."
+            warning "Remove it manually only after confirming $NGINX_CONTAINER serves ${CURRENT_CONTAINER:-the previous container}."
+        fi
     fi
 
     cleanup_staging
@@ -1010,4 +1136,9 @@ main() {
     esac
 }
 
-main "$@"
+# Only run main when executed directly. When the script is sourced (e.g.
+# by the deployment tests), the functions become available for testing
+# without performing any real deployment work.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
