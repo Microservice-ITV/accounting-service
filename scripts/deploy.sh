@@ -516,13 +516,16 @@ switch_nginx() {
     return 0
 }
 
+
 # ============================================================
 # VERIFY NGINX UPSTREAM
 # ============================================================
 verify_nginx_upstream() {
     local expected_container="$1"
     local actual_container=""
+    local nginx_config=""
 
+    # Verify the host upstream file
     actual_container="$(sed -n 's/^[[:space:]]*server[[:space:]]\+\([^:;[:space:]]*\):4005;.*/\1/p' "$NGINX_UPSTREAM_FILE" | head -n 1)"
 
     if [[ "$actual_container" != "$expected_container" ]]; then
@@ -532,9 +535,19 @@ verify_nginx_upstream() {
         return 1
     fi
 
-    if ! docker exec "$NGINX_CONTAINER" nginx -T 2>/dev/null | grep -Fq "server ${expected_container}:4005;"; then
+    # Capture the full active Nginx configuration before searching it.
+    # This avoids grep -q closing the pipe early when pipefail is enabled.
+    if ! nginx_config="$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1)"; then
+        error "Failed to read active Nginx configuration."
+        printf '%s\n' "$nginx_config"
+        return 1
+    fi
+
+    if ! grep -Fq -- "server ${expected_container}:4005;" <<< "$nginx_config"; then
         error "Gateway does not contain expected upstream:"
         echo "   ${expected_container}:4005"
+        echo "Active accounting upstream configuration:"
+        grep -A3 -B1 'upstream accounting_service_backend' <<< "$nginx_config" || true
         return 1
     fi
 
