@@ -17,6 +17,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "prisma:seed": "tsx src/scripts/run-seed.ts",
+    "recovery:order-paid-projection": "tsx src/scripts/recover-order-paid-projection.ts",
     "seed": "tsx src/scripts/run-seed.ts",
     "seed:accounts": "tsx src/scripts/run-seed.ts"
   },

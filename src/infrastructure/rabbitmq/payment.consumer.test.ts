@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildCollectedPaymentJournalEventId,
+  buildOrderPaidPaymentJournalEventId,
   isPermanentError,
   normalizePaymentCollectedEvent,
   processPaymentCollected,
+  resolvePaymentJournalEventId,
   type PaymentCollectedProcessorDependencies,
 } from './payment.consumer.js';
 
@@ -153,6 +155,29 @@ test('a fully processed duplicate COD event creates no additional records or all
   assert.equal(harness.expenseJournalCount, 1);
   assert.equal(harness.paymentJournals.get(payments[0]), journal);
   assert.equal(harness.paymentSettlements.get(payments[0]), settlement);
+});
+
+test('a duplicate COD collection creates its batch expense, income journal, and settlement only once', async () => {
+  const harness = createHarness();
+  const event = collectedEvent(0);
+
+  await processPaymentCollected(event, harness.dependencies);
+  await processPaymentCollected(event, harness.dependencies);
+
+  assert.equal(harness.paymentJournals.size, 1);
+  assert.equal(harness.paymentSettlements.size, 1);
+  assert.equal(harness.expenseCount, 1);
+  assert.equal(harness.expenseJournalCount, 1);
+});
+
+test('order-paid income journal event IDs are operation-scoped and preserve existing journal IDs', () => {
+  const orderPaidId = buildOrderPaidPaymentJournalEventId(payments[0], firstEventId);
+  const collectedId = buildCollectedPaymentJournalEventId(payments[0], firstEventId);
+
+  assert.notEqual(orderPaidId, firstEventId);
+  assert.notEqual(orderPaidId, collectedId);
+  assert.equal(resolvePaymentJournalEventId(firstEventId, orderPaidId), firstEventId);
+  assert.equal(resolvePaymentJournalEventId(null, orderPaidId), orderPaidId);
 });
 
 test('a retry after the batch expense and payment journal commit completes the missing settlement', async () => {

@@ -1,4 +1,5 @@
 import { Channel, ChannelModel, ConsumeMessage, connect } from 'amqplib';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import prisma from '../../lib/prisma.js';
 import { createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
@@ -173,6 +174,32 @@ export function buildPnlOrderShopProjections(event: OrderPaidEvent, now = new Da
         amount: discount.amount,
       })),
     };
+  });
+}
+
+export async function upsertPnlOrderShopProjection(
+  tx: Prisma.TransactionClient,
+  projection: ReturnType<typeof buildPnlOrderShopProjections>[number],
+): Promise<void> {
+  const { discounts, ...data } = projection;
+  await tx.pnlOrderShop.upsert({
+    where: {
+      orderId_shopId: {
+        orderId: projection.orderId,
+        shopId: projection.shopId,
+      },
+    },
+    update: {
+      ...data,
+      discounts: {
+        deleteMany: {},
+        create: discounts,
+      },
+    },
+    create: {
+      ...data,
+      discounts: { create: discounts },
+    },
   });
 }
 
@@ -523,7 +550,7 @@ async function savePaymentJournal(input: {
     });
     await createJournalEntryInTransaction({
       ...input,
-      eventId: existingEntry?.eventId ?? input.eventId,
+      eventId: resolvePaymentJournalEventId(existingEntry?.eventId, input.eventId),
     }, tx, existingEntry?.id ?? undefined);
   });
 }
@@ -602,26 +629,7 @@ const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
 
   await prisma.$transaction(async (tx) => {
     for (const projection of projections) {
-      const { discounts, ...data } = projection;
-      await tx.pnlOrderShop.upsert({
-        where: {
-          orderId_shopId: {
-            orderId: projection.orderId,
-            shopId: projection.shopId,
-          },
-        },
-        update: {
-          ...data,
-          discounts: {
-            deleteMany: {},
-            create: discounts,
-          },
-        },
-        create: {
-          ...data,
-          discounts: { create: discounts },
-        },
-      });
+      await upsertPnlOrderShopProjection(tx, projection);
     }
   });
 
@@ -647,7 +655,7 @@ const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
   await savePaymentJournal({
     referenceType: 'PAYMENT',
     referenceId: event.data.payment_id,
-    eventId: settlement.eventId ?? event.event_id,
+    eventId: buildOrderPaidPaymentJournalEventId(event.data.payment_id, event.event_id),
     narration: `Successful payment for order ${event.data.order_id}`,
     lines: buildMerchandisePaymentJournalLines(
       paymentContext,
@@ -667,6 +675,17 @@ export type PaymentCollectedProcessorDependencies = {
 
 export function buildCollectedPaymentJournalEventId(paymentId: string, eventId: string): string {
   return `payment.collected:${paymentId}:${eventId}`;
+}
+
+export function buildOrderPaidPaymentJournalEventId(paymentId: string, eventId: string): string {
+  return `order.paid:payment-income:${paymentId}:${eventId}`;
+}
+
+export function resolvePaymentJournalEventId(
+  existingEventId: string | null | undefined,
+  proposedEventId: string,
+): string {
+  return existingEventId ?? proposedEventId;
 }
 
 async function isCollectedPaymentAlreadyProcessed(

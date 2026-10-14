@@ -161,6 +161,17 @@ export function buildDeliveryExpenseReference(
   return `DELI-${chargingBasis === 'PER_ORDER' ? 'ORDER' : 'INVOICE'}-${digest}`;
 }
 
+function formatDeliveryExpenseDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+export function buildDeliveryInvoiceExpenseReference(date: Date, sequence: number) {
+  return `DELI-INVOICE-${formatDeliveryExpenseDateKey(date)}-${String(sequence).padStart(4, '0')}`;
+}
+
 function getCandidateDeliveryExpenseReferences(input: DeliveryExpenseInput): string[] {
   return [
     `DELI-${input.deliveryId}`,
@@ -330,16 +341,38 @@ export async function recordCodCollectionBatchExpense(
     const fee = await findApplicableDeliveryFee(tx, feeLookupInput, input.effectiveAt);
     if (fee.chargingBasis === 'PER_ORDER') return;
 
-    const expenseNo = buildDeliveryExpenseReference(fee.chargingBasis, feeLookupInput);
+    const legacyExpenseReference = buildDeliveryExpenseReference('PER_INVOICE', feeLookupInput);
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(
         hashtext('accounting.delivery-expense'),
-        hashtext(${expenseNo})
+        hashtext(${legacyExpenseReference})
       )
     `;
 
-    let expense = await tx.expense.findUnique({ where: { expenseNo } });
+    let expense = await tx.expense.findFirst({
+      where: {
+        deliveryExpenseGroupId: input.groupId,
+        shopId: input.shopId,
+        deliveryCompanyId: input.deliveryCompanyId,
+      },
+    });
     if (!expense) {
+      const datePrefix = `DELI-INVOICE-${formatDeliveryExpenseDateKey(input.effectiveAt)}`;
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtext('accounting.delivery-invoice-sequence'),
+          hashtext(${datePrefix})
+        )
+      `;
+      const dailyExpenses = await tx.expense.findMany({
+        where: { expenseNo: { startsWith: `${datePrefix}-` } },
+        select: { expenseNo: true },
+      });
+      const nextSequence = dailyExpenses.reduce((max, dailyExpense) => {
+        const match = dailyExpense.expenseNo.match(/-(\d+)$/);
+        return Math.max(max, match ? Number.parseInt(match[1], 10) : 0);
+      }, 0) + 1;
+      const expenseNo = buildDeliveryInvoiceExpenseReference(input.effectiveAt, nextSequence);
       const category = await tx.expenseCategory.upsert({
         where: { code: 'DELI' },
         update: { name: 'Deli', description: 'Shop-paid delivery-company expense' },
@@ -386,10 +419,10 @@ export async function recordCodCollectionBatchExpense(
       });
     }
 
-    if (await expenseRepository.findJournalByExpenseReference(expenseNo, tx)) return;
+    if (await expenseRepository.findJournalByExpenseReference(expense.expenseNo, tx)) return;
     await journalCreator({
       referenceType: 'EXPENSE',
-      referenceId: expenseNo,
+      referenceId: expense.expenseNo,
       eventId,
       narration: `Deli - ${expense.description ?? feeLookupInput.description}`,
       entryDate: expense.expenseDate,
