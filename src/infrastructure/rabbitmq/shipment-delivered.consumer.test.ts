@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import {
+  buildDeliveryInvoiceExpenseReference,
   buildDeliveryExpenseReference,
   buildShipmentDeliveredExpense,
   normalizeShipmentDeliveredEvent,
@@ -89,10 +90,20 @@ function createDatabase(fees: Fee[]) {
     expense: {
       findUnique: async ({ where }: { where: { expenseNo: string } }) =>
         expenses.get(where.expenseNo) ?? null,
-      findFirst: async ({ where }: { where: { expenseNo: { in: string[] } } }) =>
-        [...where.expenseNo.in]
-          .map((expenseNo) => expenses.get(expenseNo))
-          .find((expense) => expense !== undefined) ?? null,
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+        if (where.expenseNo && typeof where.expenseNo === 'object' && 'in' in where.expenseNo) {
+          const references = (where.expenseNo as { in: string[] }).in;
+          return references.map((expenseNo) => expenses.get(expenseNo)).find(Boolean) ?? null;
+        }
+        return [...expenses.values()].find((expense) =>
+          Object.entries(where).every(([key, value]) => expense[key] === value)
+        ) ?? null;
+      },
+      findMany: async ({ where }: { where: { expenseNo: { startsWith: string } } }) =>
+        [...expenses.values()]
+          .filter((expense) => typeof expense.expenseNo === 'string'
+            && expense.expenseNo.startsWith(where.expenseNo.startsWith))
+          .map((expense) => ({ expenseNo: expense.expenseNo })),
       upsert: async (args: {
         where: { expenseNo: string };
         create: Record<string, unknown>;
@@ -339,6 +350,9 @@ test('PER_INVOICE charges the configured fee once and links every order in the C
     ['ORD-001', 'ORD-002', 'ORD-003', 'ORD-004', 'ORD-005'],
   );
   assert.deepEqual([...harness.expenses.values()].map((expense) => expense.currency), ['MMK']);
+  assert.deepEqual([...harness.expenses.values()].map((expense) => expense.expenseNo), [
+    'DELI-INVOICE-20261009-0001',
+  ]);
   assert.equal(harness.journalCreateCount, 1);
 });
 
@@ -361,6 +375,10 @@ test('distinct PER_INVOICE batches on the same day create separate expenses', as
   assert.equal(harness.expenseCreateCount, 2);
   assert.equal(expenseTotal(harness.expenses), 800);
   assert.equal(harness.expenseOrderLinks.size, 7);
+  assert.deepEqual(
+    [...harness.expenses.values()].map((expense) => expense.expenseNo).sort(),
+    ['DELI-INVOICE-20261009-0001', 'DELI-INVOICE-20261009-0002'],
+  );
 });
 
 test('duplicate and concurrent PER_INVOICE events create one expense and journal', async () => {
@@ -379,6 +397,10 @@ test('duplicate and concurrent PER_INVOICE events create one expense and journal
   assert.equal(expenseTotal(harness.expenses), 400);
   assert.equal(harness.expenseOrderLinks.size, 5);
   assert.equal(harness.journalCreateCount, 1);
+  assert.equal(
+    [...harness.expenses.values()][0].expenseNo,
+    'DELI-INVOICE-20261009-0001',
+  );
 });
 
 test('a replayed batch ID cannot add unrelated orders to an existing expense', async () => {
@@ -461,6 +483,10 @@ test('expense references include the shop and Delivery Company identity', () => 
   assert.match(
     buildDeliveryExpenseReference('PER_INVOICE', { ...input, deliveryExpenseGroupId: 'batch-1' }),
     /^DELI-INVOICE-/,
+  );
+  assert.equal(
+    buildDeliveryInvoiceExpenseReference(new Date(2026, 9, 9), 1),
+    'DELI-INVOICE-20261009-0001',
   );
   assert.notEqual(
     buildDeliveryExpenseReference('PER_ORDER', input),
