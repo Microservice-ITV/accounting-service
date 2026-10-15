@@ -42,6 +42,8 @@ docker compose up -d --build
 
 The consumer uses the durable queue `accounting.payment_completed`, binds it to all three routing keys, and sends malformed, unsupported, or permanently invalid messages to `accounting.payment_completed.dlq`. Successful events create balanced entries with Cash (`1000`) debited and Revenue (`4000`) credited. COD collection credits Revenue separately for each allocated shop. The event ID and payment reference prevent duplicate journal entries.
 
+Production and staging deployments must run an image built from the current Accounting Service source. The consumer dispatches `payment.completed`, `payment.collected`, and `order.paid` by each payload's `event` field; an older image that assumes every message is `payment.completed` will reject the other two event types. Set all three routing keys in the deployment environment and rebuild/redeploy the image when updating the consumer.
+
 To verify an entry after publishing a successful payment event:
 
 ```powershell
