@@ -33,14 +33,14 @@ curl http://localhost:4005/health
 
 ## Payment accounting integration
 
-The accounting consumer listens for `payment.completed` and `payment.collected` from the payment service on the existing `order_events` exchange. COD revenue is recognized only from `payment.collected`, using the payment service's existing per-shop allocations. For local Docker testing, point `PAYMENT_RABBITMQ_URL` at the same RabbitMQ broker configured in `payment-service/.env` before starting the accounting service:
+The accounting consumer listens for `payment.completed`, `payment.collected`, and `order.paid` on the existing `order_events` exchange. `payment.completed` recognizes successful non-COD payments; a COD completion is deferred. COD revenue is recognized only from the payment service's `payment.collected` event, which requires COD attribution, a collection timestamp, and per-shop allocations. `order.paid` creates/updates shop sales projections but never recognizes COD income; non-COD income is written only when a posted payment settlement already exists. For local Docker testing, point `PAYMENT_RABBITMQ_URL` at the same RabbitMQ broker configured in `payment-service/.env` before starting the accounting service:
 
 ```powershell
 $env:PAYMENT_RABBITMQ_URL = (Get-Content ..\payment-service\.env | Where-Object { $_ -match '^RABBITMQ_URL=' }).Split('=', 2)[1] -replace '@rabbitmq(?=:)', '@orderservice-rabbitmq'
 docker compose up -d --build
 ```
 
-The consumer uses the durable queue `accounting.payment_completed`, binds it to both payment routing keys, and sends malformed or permanently invalid messages to `accounting.payment_completed.dlq`. Successful events create balanced entries with Cash (`1000`) debited and Revenue (`4000`) credited. COD collection credits Revenue separately for each allocated shop. The event ID and payment reference prevent duplicate journal entries.
+The consumer uses the durable queue `accounting.payment_completed`, binds it to all three routing keys, and sends malformed, unsupported, or permanently invalid messages to `accounting.payment_completed.dlq`. Successful events create balanced entries with Cash (`1000`) debited and Revenue (`4000`) credited. COD collection credits Revenue separately for each allocated shop. The event ID and payment reference prevent duplicate journal entries.
 
 To verify an entry after publishing a successful payment event:
 

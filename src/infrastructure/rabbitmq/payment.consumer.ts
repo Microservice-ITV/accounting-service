@@ -42,7 +42,8 @@ const paymentCollectedSchema = z.object({
     checkout_id: z.string().min(1).optional(),
     amount: z.number().finite().positive(),
     currency: z.string().min(1).optional(),
-    payment_method: z.string().min(1).optional(),
+    payment_method: z.literal('cod'),
+    collected_at: z.string().datetime({ offset: true }),
     shop_breakdown: z.array(z.object({
       shop_id: z.string().min(1),
       gross_amount: z.number().finite().nonnegative(),
@@ -64,6 +65,9 @@ const orderPaidSchema = z.object({
   data: z.object({
     order_id: z.string().min(1),
     payment_id: z.string().min(1).optional(),
+    status: z.literal('ORDER_PAID').optional(),
+    payment_status: z.enum(['COD', 'PAID']).optional(),
+    amount: z.number().finite().nonnegative().optional(),
     currency: z.string().min(1).optional(),
     promotion_allocations: z.array(z.object({
       promotion_id: z.string().optional(),
@@ -84,10 +88,16 @@ const orderPaidSchema = z.object({
   }).passthrough(),
 }).passthrough();
 
+const paymentEventSchema = z.discriminatedUnion('event', [
+  paymentCompletedSchema,
+  paymentCollectedSchema,
+  orderPaidSchema,
+]);
+
 type PaymentCompletedEvent = z.infer<typeof paymentCompletedSchema>;
 type PaymentCollectedEvent = z.infer<typeof paymentCollectedSchema>;
 type OrderPaidEvent = z.infer<typeof orderPaidSchema>;
-type PaymentEvent = PaymentCompletedEvent | PaymentCollectedEvent | OrderPaidEvent;
+type PaymentEvent = z.infer<typeof paymentEventSchema>;
 
 export type PaymentJournalContext = {
   payment_id: string;
@@ -120,14 +130,15 @@ export function normalizeOrderPaidEvent(raw: unknown): OrderPaidEvent {
 }
 
 export function normalizePaymentEvent(raw: unknown): PaymentEvent {
-  const event = z.object({ event: z.string() }).passthrough().parse(raw);
-  if (event.event === 'payment.collected') return normalizePaymentCollectedEvent(raw);
-  if (event.event === 'order.paid') return normalizeOrderPaidEvent(raw);
-  return normalizePaymentCompletedEvent(raw);
+  return paymentEventSchema.parse(raw);
 }
 
 export function shouldRecognizeCompletedPayment(event: PaymentCompletedEvent): boolean {
   return event.data.payment_method?.toLowerCase() !== 'cod';
+}
+
+export function shouldRecognizeOrderPaidIncome(event: OrderPaidEvent): boolean {
+  return event.data.payment_status !== 'COD';
 }
 
 export function shouldRecognizePaymentEvent(event: PaymentEvent): boolean {
@@ -632,6 +643,8 @@ const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
       await upsertPnlOrderShopProjection(tx, projection);
     }
   });
+
+  if (!shouldRecognizeOrderPaidIncome(event)) return;
 
   await syncOrderPaidSettlement(event);
 
