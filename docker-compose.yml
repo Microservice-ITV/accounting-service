@@ -18,7 +18,7 @@ services:
       AUTH_SERVICE_BASE_URL: http://authservice-nginx/api/v1
       SHIPPING_SERVICE_BASE_URL: ${SHIPPING_SERVICE_BASE_URL:-http://shippingservice-nginx/shipping}
       DATABASE_URL: postgresql://postgres:postgres@accounting-db:5432/accounting_service?schema=public
-      RABBITMQ_URL: ${PAYMENT_RABBITMQ_URL:-amqp://guest:guest@orderservice-rabbitmq:5672}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672}
       RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-order_events}
       RABBITMQ_PAYMENT_COMPLETED_KEY: ${RABBITMQ_PAYMENT_COMPLETED_KEY:-payment.completed}
       RABBITMQ_PAYMENT_COLLECTED_KEY: ${RABBITMQ_PAYMENT_COLLECTED_KEY:-payment.collected}
@@ -29,8 +29,6 @@ services:
       ACCOUNTING_JOURNAL_ENTRY_ROUTING_KEY: ${ACCOUNTING_JOURNAL_ENTRY_ROUTING_KEY:-accounting.journal-entry.upserted}
     depends_on:
       accounting-db:
-        condition: service_started
-      rabbitmq:
         condition: service_started
     networks:
       - accounting-network
@@ -54,25 +52,6 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
-    networks:
-      - accounting-network
-
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: accounting-rabbitmq
-    restart: unless-stopped
-    ports:
-      - "5673:5672"
-      - "15673:15672"
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
     networks:
       - accounting-network
 
