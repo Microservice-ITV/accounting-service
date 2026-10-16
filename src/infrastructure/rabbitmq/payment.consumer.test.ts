@@ -8,6 +8,8 @@ import {
   normalizePaymentEvent,
   processPaymentCollected,
   resolvePaymentJournalEventId,
+  shouldRecognizeOrderPaidIncome,
+  shouldRecognizePaymentEvent,
   type PaymentCollectedProcessorDependencies,
 } from './payment.consumer.js';
 
@@ -64,6 +66,7 @@ function collectedEvent(index: number) {
       amount: 100,
       currency: 'MMK',
       payment_method: 'cod',
+      collected_at: '2026-10-09T03:24:34.000Z',
       shop_breakdown: [{ shop_id: 'shop-a', gross_amount: 100 }],
       delivery_expense_group: {
         group_id: batchId,
@@ -75,6 +78,117 @@ function collectedEvent(index: number) {
     },
   });
 }
+
+function orderPaidEvent(paymentStatus: 'COD' | 'PAID' = 'PAID') {
+  return normalizeOrderPaidEvent({
+    event_id: firstEventId,
+    event: 'order.paid',
+    data: {
+      order_id: orders[0],
+      payment_id: payments[0],
+      status: 'ORDER_PAID',
+      payment_status: paymentStatus,
+      amount: 100,
+      currency: 'MMK',
+      shop_breakdown: [{
+        shop_id: 'shop-a',
+        subtotal: 100,
+        grand_total: 100,
+      }],
+    },
+  });
+}
+
+test('valid payment.completed is recognized for online methods but deferred for COD', () => {
+  const onlineEvent = normalizePaymentEvent({
+    event_id: firstEventId,
+    event: 'payment.completed',
+    data: {
+      payment_id: payments[0],
+      order_id: orders[0],
+      amount: 100,
+      currency: 'MMK',
+      payment_method: 'card',
+      status: 'SUCCESS',
+    },
+  });
+  const codEvent = normalizePaymentEvent({
+    event_id: 'cod-completed-event',
+    event: 'payment.completed',
+    data: {
+      payment_id: payments[1],
+      order_id: orders[1],
+      amount: 100,
+      currency: 'MMK',
+      payment_method: 'cod',
+      status: 'SUCCESS',
+    },
+  });
+
+  assert.equal(shouldRecognizePaymentEvent(onlineEvent), true);
+  assert.equal(shouldRecognizePaymentEvent(codEvent), false);
+});
+
+test('payment.collected requires explicit COD collection and validates amount and currency', () => {
+  assert.equal(normalizePaymentCollectedEvent(collectedEvent(0)).data.payment_method, 'cod');
+  assert.throws(() => normalizePaymentCollectedEvent({
+    event_id: firstEventId,
+    event: 'payment.collected',
+    data: {
+      payment_id: payments[0],
+      amount: 100,
+      currency: 'MMK',
+      payment_method: 'card',
+      collected_at: '2026-10-09T03:24:34.000Z',
+      shop_breakdown: [{ shop_id: 'shop-a', gross_amount: 100 }],
+    },
+  }));
+  assert.throws(() => normalizePaymentCollectedEvent({
+    event_id: firstEventId,
+    event: 'payment.collected',
+    data: {
+      payment_id: payments[0],
+      amount: Number.NaN,
+      currency: '',
+      payment_method: 'cod',
+      collected_at: '2026-10-09T03:24:34.000Z',
+      shop_breakdown: [{ shop_id: 'shop-a', gross_amount: 100 }],
+    },
+  }));
+});
+
+test('order.paid accepts ORDER_PAID and does not recognize COD as collected income', () => {
+  const paidEvent = orderPaidEvent('PAID');
+  const codOrderEvent = orderPaidEvent('COD');
+
+  assert.equal(paidEvent.data.status, 'ORDER_PAID');
+  assert.equal(shouldRecognizeOrderPaidIncome(paidEvent), true);
+  assert.equal(shouldRecognizeOrderPaidIncome(codOrderEvent), false);
+});
+
+test('unsupported events and invalid payment statuses are permanent schema errors', () => {
+  assert.throws(() => normalizePaymentEvent({
+    event_id: firstEventId,
+    event: 'payment.failed',
+    data: {},
+  }), (error: unknown) => isPermanentError(error));
+  assert.throws(() => normalizePaymentCompletedEvent({
+    event_id: firstEventId,
+    event: 'payment.completed',
+    data: {
+      payment_id: payments[0],
+      amount: 100,
+      status: 'ORDER_PAID',
+    },
+  }));
+  assert.throws(() => normalizeOrderPaidEvent({
+    ...orderPaidEvent(),
+    data: {
+      ...orderPaidEvent().data,
+      status: 'SUCCESS',
+    },
+  }));
+});
 
 function createHarness(options: { committedExpense?: boolean; failFirstSettlement?: boolean } = {}) {
   const paymentJournals = new Map<string, { eventId: string; lines: unknown[] }>();
