@@ -5,6 +5,7 @@ import {
   buildOrderPaidPaymentJournalEventId,
   isPermanentError,
   normalizePaymentCollectedEvent,
+  normalizePaymentEvent,
   processPaymentCollected,
   resolvePaymentJournalEventId,
   type PaymentCollectedProcessorDependencies,
@@ -20,6 +21,33 @@ const firstEventId = '83f7726c-67bc-44b1-ad1f-1bb6fd9accdf';
 test('missing accounting accounts remain retryable after master data is repaired', () => {
   assert.equal(isPermanentError(new Error('Unknown account codes: 5000, 1000')), false);
   assert.equal(isPermanentError(new Error('Journal entry is out of balance: DEBIT 100 != CREDIT 90')), true);
+});
+
+test('payment event dispatcher selects schemas by the event name', () => {
+  const orderPaid = normalizePaymentEvent({
+    event_id: 'order-paid-event',
+    event: 'order.paid',
+    data: {
+      order_id: orders[0],
+      shop_breakdown: [{
+        shop_id: 'shop-a',
+        subtotal: 100,
+        grand_total: 100,
+      }],
+    },
+  });
+  const paymentCollected = normalizePaymentEvent({
+    event_id: 'payment-collected-event',
+    event: 'payment.collected',
+    data: {
+      payment_id: payments[0],
+      amount: 100,
+      shop_breakdown: [{ shop_id: 'shop-a', gross_amount: 100 }],
+    },
+  });
+
+  assert.equal(orderPaid.event, 'order.paid');
+  assert.equal(paymentCollected.event, 'payment.collected');
 });
 
 function collectedEvent(index: number) {

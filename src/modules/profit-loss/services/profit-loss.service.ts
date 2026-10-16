@@ -307,7 +307,7 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
           label: 'Current partial profit/loss; not complete ecommerce profit',
         },
       },
-      commissionStatus: 'unresolved: order-service computes 3%; wallet settlement defaults to 5%',
+      commissionStatus: 'temporarily disabled: platform commission rate is 0%',
       breakdown,
     };
   });
@@ -333,7 +333,7 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
       ...MISSING_COMPONENTS,
       ...reports.flatMap((report) => report.missingComponents.includes('discountAllocations') ? ['discountAllocations'] : []),
     ])],
-    commissionStatus: 'unresolved: order-service computes 3%; wallet settlement defaults to 5%',
+    commissionStatus: 'temporarily disabled: platform commission rate is 0%',
     reports,
   };
 }
