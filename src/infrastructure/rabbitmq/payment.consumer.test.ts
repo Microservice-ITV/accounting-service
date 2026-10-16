@@ -4,6 +4,8 @@ import {
   buildCollectedPaymentJournalEventId,
   buildOrderPaidPaymentJournalEventId,
   isPermanentError,
+  normalizeOrderPaidEvent,
+  normalizePaymentCompletedEvent,
   normalizePaymentCollectedEvent,
   normalizePaymentEvent,
   processPaymentCollected,
