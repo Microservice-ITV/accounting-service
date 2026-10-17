@@ -7,6 +7,7 @@ import prisma from '../../lib/prisma.js';
 import { createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
 import { ExpenseRepository } from '../../modules/expenses/repositories/expense.repository.js';
 import { config } from '../../config/index.js';
+import { recordCodDeliveryCollectionJournal } from '../../modules/entries/cod-lifecycle.service.js';
 
 const shipmentDeliveredSchema = z.object({
   event_id: z.string().min(1),
@@ -459,6 +460,13 @@ const consumeMessages = async (activeChannel: Channel): Promise<void> => {
       try {
         const raw: unknown = JSON.parse(message.content.toString('utf8'));
         const event = normalizeShipmentDeliveredEvent(raw);
+        const deliveredOrder = buildShipmentDeliveredExpense(event);
+        await recordCodDeliveryCollectionJournal({
+          orderId: deliveredOrder.orderId,
+          shopId: deliveredOrder.shopId,
+          eventId: event.event_id,
+          entryDate: deliveredOrder.expenseDate,
+        });
         await recordShipmentDeliveredExpenses(event);
         activeChannel.ack(message);
       } catch (error) {

@@ -9,6 +9,8 @@ export type EntryLineInput = {
   accountCode: string;
   direction: Direction;
   amount: number;
+  currency?: string;
+  shopId?: string;
   memo?: string;
 };
 
@@ -96,6 +98,8 @@ export function buildJournalEntryUpsertEvent(
           id: line.id,
           direction: line.direction,
           amount: Number(line.amount),
+          currency: line.currency,
+          shopId: line.shopId,
           memo: line.memo,
           account: line.account,
         })),
@@ -158,6 +162,8 @@ export async function createJournalEntryInTransaction(
           accountId: accountMap.get(line.accountCode)!.id,
           direction: line.direction,
           amount: line.amount,
+          currency: line.currency,
+          shopId: line.shopId,
           memo: line.memo || null,
         },
       }),

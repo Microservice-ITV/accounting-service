@@ -14,6 +14,8 @@ export type RecoveryProjectionRecord = {
   shopId: string;
   sourceEventId: string;
   shopOrderId: string | null;
+  paymentId: string | null;
+  paymentStatus: string | null;
   currency: string;
   grossItemSales: number;
   discountTotal: number;
@@ -62,6 +64,8 @@ const prismaRecoveryDependencies: OrderPaidRecoveryDependencies = {
         shopId: row.shopId,
         sourceEventId: row.sourceEventId,
         shopOrderId: row.shopOrderId,
+        paymentId: row.paymentId,
+        paymentStatus: row.paymentStatus,
         currency: row.currency,
         grossItemSales: Number(row.grossItemSales.toString()),
         discountTotal: Number(row.discountTotal.toString()),
@@ -90,6 +94,10 @@ const prismaRecoveryDependencies: OrderPaidRecoveryDependencies = {
         where: {
           OR: [
             { referenceType: 'PAYMENT', referenceId: paymentId },
+            { referenceType: 'COD_REVENUE', referenceId: { startsWith: `${orderId}:` } },
+            { referenceType: 'COD_DELIVERY_COLLECTION', referenceId: { startsWith: `${orderId}:` } },
+            { referenceType: 'COD_BANK_RECEIPT', referenceId: { startsWith: `${paymentId}:` } },
+            { referenceType: 'COD_COLLECTION', referenceId: { startsWith: `${paymentId}:` } },
             { eventId: { in: eventIds } },
             {
               referenceType: 'EXPENSE',
@@ -117,6 +125,8 @@ function assertExistingProjectionMatches(
   if (
     existing.sourceEventId !== expected.sourceEventId
     || existing.shopOrderId !== expected.shopOrderId
+    || existing.paymentId !== expected.paymentId
+    || existing.paymentStatus !== expected.paymentStatus
     || existing.currency !== expected.currency
     || toCents(existing.grossItemSales) !== toCents(expected.grossItemSales)
     || toCents(existing.discountTotal) !== toCents(expected.discountTotal)
@@ -171,8 +181,14 @@ export async function recoverOrderPaidProjection(
       event.data.order_id,
       [event.event_id, incomeEventId],
     );
-    if (journals.some((journal) => journal.referenceType === 'PAYMENT')) {
-      throw new Error('Payment journal already exists; refusing projection-only recovery');
+    if (journals.some((journal) =>
+      journal.referenceType === 'PAYMENT'
+      || journal.referenceType === 'COD_REVENUE'
+      || journal.referenceType === 'COD_DELIVERY_COLLECTION'
+      || journal.referenceType === 'COD_BANK_RECEIPT'
+      || journal.referenceType === 'COD_COLLECTION'
+    )) {
+      throw new Error('Payment journal or COD journal already exists; refusing projection-only recovery');
     }
     if (journals.some((journal) => journal.eventId === event.event_id || journal.eventId === incomeEventId)) {
       throw new Error('A journal already owns an order.paid recovery event ID');

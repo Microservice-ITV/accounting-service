@@ -280,6 +280,8 @@ model PnlOrderShop {
   shopOrderId                 String?
   sourceEventId               String
   shopId                      String
+  paymentId                   String?
+  paymentStatus               String?
   currency                    String                       @default("MMK")
   grossItemSales              Decimal                      @db.Decimal(10, 2)
   discountTotal               Decimal                      @db.Decimal(10, 2)
@@ -350,6 +352,8 @@ model EntryLine {
   account        Account   @relation(fields: [accountId], references: [id])
   direction      Direction
   amount         Decimal
+  currency       String?
+  shopId         String?
   memo           String?
   createdAt      DateTime  @default(now())
 

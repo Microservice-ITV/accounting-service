@@ -8,7 +8,10 @@ const defaultAccounts: Array<{
   type: AccountType;
 }> = [
   { code: '1000', name: 'Cash', type: 'ASSET' },
+  { code: '1010', name: 'Bank Account', type: 'ASSET' },
   { code: '1100', name: 'Accounts Receivable', type: 'ASSET' },
+  { code: '1200', name: 'COD Receivable', type: 'ASSET' },
+  { code: '1210', name: 'COD Collection Clearing', type: 'ASSET' },
   { code: '2000', name: 'Accounts Payable', type: 'LIABILITY' },
   { code: '2100', name: 'Seller Payables', type: 'LIABILITY' },
   { code: '3000', name: 'Owner Equity', type: 'EQUITY' },
