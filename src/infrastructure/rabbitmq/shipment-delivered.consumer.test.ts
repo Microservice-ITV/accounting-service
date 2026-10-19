@@ -74,6 +74,7 @@ function createDatabase(fees: Fee[]) {
   const feeLookupScopes: Array<{ shopId: string; deliveryCompanyId: string }> = [];
   let expenseCreateCount = 0;
   const journalAmounts: number[][] = [];
+  const journalAccountCodes: string[][] = [];
   const tx = {
     deliveryCompanyFee: {
       findMany: async ({ where }: { where: { shopId: string; deliveryCompanyId: string } }) => {
@@ -163,6 +164,7 @@ function createDatabase(fees: Fee[]) {
   const journalCreator: typeof createJournalEntryInTransaction = async (input) => {
     journalReferences.add(input.referenceId);
     journalAmounts.push(input.lines.map((line) => line.amount));
+    journalAccountCodes.push(input.lines.map((line) => line.accountCode));
     return undefined as never;
   };
 
@@ -175,6 +177,7 @@ function createDatabase(fees: Fee[]) {
     get expenseCreateCount() { return expenseCreateCount; },
     get journalCreateCount() { return journalAmounts.length; },
     get journalAmounts() { return journalAmounts; },
+    get journalAccountCodes() { return journalAccountCodes; },
   };
 }
 
@@ -228,6 +231,21 @@ test('finds the fee by both shop and Delivery Company identity', async () => {
   assert.equal(expense?.amount?.toString(), '300');
   assert.equal(expense?.deliveryCompanyId, DELIVERY_COMPANY_ID);
   assert.equal(expense?.shopId, SHOP_ID);
+});
+
+test('delivery-expense journal posting is separate from COD collection accounting', async () => {
+  const harness = createDatabase([fee('shop-delivery-fee', '300.00')]);
+  const buyerConfirmedDelivery = makeEvent();
+
+  await recordShipmentDeliveredExpenses(
+    buyerConfirmedDelivery,
+    harness.database,
+    harness.journalCreator,
+  );
+
+  assert.deepEqual(harness.journalAccountCodes, [['5000', '1000']]);
+  assert.equal(harness.journalAccountCodes.flat().includes('1200'), false);
+  assert.equal(harness.journalAccountCodes.flat().includes('1210'), false);
 });
 
 test('does not use another shop or Delivery Company fee', async () => {

@@ -127,6 +127,21 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
 
   const reportEntries = data.entries.map((line) => {
     if (
+      line.journalEntry.referenceType === 'COD_REVENUE'
+      && line.account.type === 'INCOME'
+      && line.direction === 'CREDIT'
+    ) {
+      const memo = String(line.memo ?? '');
+      const shopMatch = memo.match(/(?:^|[\s,(])shop(?:_id)?=([^,\s)]+)/i);
+      const orderMatch = memo.match(/(?:^|[\s,(])order(?:_id)?=([^,\s)]+)/i);
+      const shopId = shopMatch?.[1] ?? line.shopId;
+      const recognizedRevenue = shopId && orderMatch
+        ? recognizedRevenueByOrderAndShop.get(`${orderMatch[1]}\u0000${shopId}`)
+        : undefined;
+      return recognizedRevenue === undefined ? line : { ...line, amount: recognizedRevenue };
+    }
+
+    if (
       line.journalEntry.referenceType === 'PAYMENT'
       && line.direction === 'CREDIT'
       && line.account.code === '2000'
@@ -221,6 +236,26 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
     const period = periodFor(payment.createdAt, query.groupBy);
     const { bucket, point } = ensureBucket(payment.currency, period);
     const amount = incomeByPaymentAndShop.get(key) ?? 0;
+    bucket.actualRevenue += amount;
+    point!.actualRevenue += amount;
+  }
+
+  for (const line of reportEntries) {
+    if (
+      line.journalEntry.referenceType !== 'COD_REVENUE'
+      || line.account.type !== 'INCOME'
+      || line.direction !== 'CREDIT'
+      || !line.journalEntry.entryDate
+    ) {
+      continue;
+    }
+    const shopId = line.shopId
+      ?? String(line.memo ?? '').match(/(?:^|[\s,(])shop(?:_id)?=([^,\s)]+)/i)?.[1]
+      ?? null;
+    if (!shopIsInScope(shopId)) continue;
+    const period = periodFor(line.journalEntry.entryDate, query.groupBy);
+    const { bucket, point } = ensureBucket(line.currency ?? 'UNKNOWN', period);
+    const amount = numberOf(line.amount);
     bucket.actualRevenue += amount;
     point!.actualRevenue += amount;
   }
@@ -380,6 +415,17 @@ export class ProfitLossService implements IProfitLossService {
       if (entry.referenceType === 'EXPENSE') {
         const shopId = expenseShopByReference.get(entry.referenceId);
         return Boolean(shopId) && (allScope || authorizedShopIds.has(String(shopId)));
+      }
+      if (entry.referenceType === 'COD_REVENUE') {
+        if (line.direction !== 'CREDIT') return false;
+        const isIncomeLine = line.account.type === 'INCOME';
+        const isDeliveryFeeLine = line.account.code === '2000'
+          && /^Delivery fee payable(?:\s|$)/i.test(line.memo ?? '');
+        if (!isIncomeLine && !isDeliveryFeeLine) return false;
+        const shopId = line.shopId
+          ?? String(line.memo ?? '').match(/(?:^|[\s,(])shop(?:_id)?=([^,\s)]+)/i)?.[1];
+        if (!shopId) return false;
+        return allScope || authorizedShopIds.has(shopId);
       }
       if (entry.referenceType !== 'PAYMENT' || line.direction !== 'CREDIT') {
         return false;

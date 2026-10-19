@@ -164,6 +164,22 @@ test('service filters journal entries to the authenticated shop scope', async ()
       journalEntry: { referenceType: 'PAYMENT', referenceId: 'PAY-1' },
       account: { type: 'LIABILITY', code: '2000' },
     },
+    {
+      direction: 'CREDIT',
+      amount: 75,
+      memo: 'COD sales revenue recognized (MMK; order=ORDER-3, shop=shop-1)',
+      shopId: 'shop-1',
+      journalEntry: { referenceType: 'COD_REVENUE', referenceId: 'ORDER-3:shop-1' },
+      account: { type: 'INCOME', code: '4000' },
+    },
+    {
+      direction: 'CREDIT',
+      amount: 15,
+      memo: 'Delivery fee payable (MMK; order=ORDER-3, shop=shop-1)',
+      shopId: 'shop-1',
+      journalEntry: { referenceType: 'COD_REVENUE', referenceId: 'ORDER-3:shop-1' },
+      account: { type: 'LIABILITY', code: '2000' },
+    },
   ];
   data.paymentLines = [
     {
@@ -203,13 +219,13 @@ test('service filters journal entries to the authenticated shop scope', async ()
 
   assert.deepEqual(
     response.entries.map((entry) => entry.journalEntry.referenceId),
-    ['EXP-1', 'PAY-1', 'PAY-1'],
+    ['EXP-1', 'PAY-1', 'PAY-1', 'ORDER-3:shop-1', 'ORDER-3:shop-1'],
   );
   assert.deepEqual(
     response.entries
       .filter((entry) => entry.account.code === '2000')
       .map((entry) => entry.amount),
-    [12],
+    [12, 15],
   );
   assert.equal(
     response.entries.find((entry) => entry.account.code === '2000')?.currency,
@@ -370,6 +386,39 @@ test('income API corrects an existing collected COD journal to merchandise sales
 
   assert.equal(response.entries[0].amount, 5500);
   assert.equal(response.reports[0].actualRevenue, 5500);
+});
+
+test('COD revenue is reported on delivery date using shop and currency attribution', () => {
+  const response = buildProfitLossResponse(query, {
+    ...emptyData(),
+    salesProjections: [
+      sales({
+        grossItemSales: 5500,
+        discountTotal: 0,
+        shippingTotal: 1575.88,
+        paidAmount: 7075.88,
+        discounts: [],
+      }),
+    ],
+    entries: [{
+      direction: 'CREDIT',
+      amount: 7075.88,
+      memo: 'Sales revenue recognized on delivery (MMK; order=order-a, shop=shop-1)',
+      currency: 'MMK',
+      shopId: 'shop-1',
+      journalEntry: {
+        referenceType: 'COD_REVENUE',
+        referenceId: 'order-a:shop-1',
+        entryDate: new Date('2026-06-20T00:00:00.000Z'),
+      },
+      account: { type: 'INCOME', code: '4000' },
+    }],
+  });
+
+  assert.equal(response.reports[0].actualRevenue, 5500);
+  assert.equal(response.reports[0].breakdown[0].actualRevenue, 5500);
+  assert.equal(response.entries[0].shopId, 'shop-1');
+  assert.equal(response.entries[0].amount, 5500);
 });
 
 test('only approved shop expenses within the period and scope are included', () => {

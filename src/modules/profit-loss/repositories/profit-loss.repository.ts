@@ -18,7 +18,7 @@ export class ProfitLossRepository implements IProfitLossRepository {
   async getProfitLossData(query: ScopedProfitLossQuery): Promise<ProfitLossQueryData> {
     const shopIds = query.scope.shopIds ?? undefined;
     const periodWhere = dateWhere(query.from, query.to);
-    const [salesProjections, paymentLines, expenses] = await Promise.all([
+    const [salesProjections, paymentLines, expenses, codRevenueEntries] = await Promise.all([
       prisma.pnlOrderShop.findMany({
         where: {
           ...(shopIds ? { shopId: { in: shopIds } } : {}),
@@ -57,6 +57,29 @@ export class ProfitLossRepository implements IProfitLossRepository {
           expenseNo: true,
         },
       }),
+      prisma.entryLine.findMany({
+        where: {
+          direction: 'CREDIT',
+          OR: [
+            { account: { type: 'INCOME' } },
+            {
+              account: { code: '2000' },
+              memo: { startsWith: 'Delivery fee payable' },
+            },
+          ],
+          shopId: shopIds ? { in: shopIds } : { not: null },
+          journalEntry: {
+            referenceType: 'COD_REVENUE',
+            status: 'POSTED',
+            entryDate: periodWhere,
+          },
+        },
+        include: {
+          journalEntry: true,
+          account: { select: { code: true, name: true, type: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
     ]);
 
     const paymentReferences = [...new Set(paymentLines.map((line) => line.settlement.paymentReference))];
@@ -93,7 +116,7 @@ export class ProfitLossRepository implements IProfitLossRepository {
       salesProjections,
       paymentLines,
       expenses,
-      entries,
+      entries: [...entries, ...codRevenueEntries],
     };
   }
 }

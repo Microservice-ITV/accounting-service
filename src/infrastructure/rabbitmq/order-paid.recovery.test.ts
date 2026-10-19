@@ -50,6 +50,8 @@ function projectionRecord(
     shopId: projection.shopId,
     sourceEventId: projection.sourceEventId,
     shopOrderId: projection.shopOrderId,
+    paymentId: projection.paymentId,
+    paymentStatus: projection.paymentStatus,
     currency: projection.currency,
     grossItemSales: projection.grossItemSales,
     discountTotal: projection.discountTotal,
@@ -172,7 +174,7 @@ test('recovery refuses a pre-existing settlement or payment journal', async () =
   });
   await assert.rejects(
     recoverOrderPaidProjection(orderPaidEvent(), expectedIds(), journalHarness.dependencies),
-    /Payment journal already exists/,
+    /Payment journal or COD journal already exists/,
   );
   assert.equal(journalHarness.committed.size, 0);
 });

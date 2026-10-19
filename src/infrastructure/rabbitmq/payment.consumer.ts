@@ -8,6 +8,10 @@ import {
   PermanentShipmentDeliveredEventError,
   recordCodCollectionBatchExpense,
 } from './shipment-delivered.consumer.js';
+import {
+  recordCodBankReceiptJournals,
+  recordCodOrderRevenue,
+} from '../../modules/entries/cod-lifecycle.service.js';
 
 const shopBreakdownLineSchema = z.object({
   shop_id: z.string().min(1).optional(),
@@ -41,7 +45,7 @@ const paymentCollectedSchema = z.object({
     order_id: z.string().min(1).optional(),
     checkout_id: z.string().min(1).optional(),
     amount: z.number().finite().positive(),
-    currency: z.string().min(1).optional(),
+    currency: z.string().trim().min(1),
     payment_method: z.literal('cod'),
     collected_at: z.string().datetime({ offset: true }),
     shop_breakdown: z.array(z.object({
@@ -147,6 +151,29 @@ export function shouldRecognizePaymentEvent(event: PaymentEvent): boolean {
   return false;
 }
 
+export function validateCodOrderPaidEvent(event: OrderPaidEvent): void {
+  if (event.data.payment_status !== 'COD') return;
+  if (!event.data.payment_id || !event.data.currency || event.data.amount === undefined) {
+    throw new PermanentShipmentDeliveredEventError(
+      'COD order.paid event requires payment_id, currency, and order amount',
+    );
+  }
+  const shopIds = new Set<string>();
+  let allocatedCents = 0;
+  for (const shop of event.data.shop_breakdown) {
+    if (shopIds.has(shop.shop_id)) {
+      throw new PermanentShipmentDeliveredEventError('COD order.paid contains duplicate shop allocations');
+    }
+    shopIds.add(shop.shop_id);
+    allocatedCents += Math.round(shop.grand_total * 100);
+  }
+  if (allocatedCents !== Math.round(event.data.amount * 100)) {
+    throw new PermanentShipmentDeliveredEventError(
+      'COD order.paid shop totals do not match the order amount',
+    );
+  }
+}
+
 export function buildPnlOrderShopProjections(event: OrderPaidEvent, now = new Date()) {
   const allocationsByShop = new Map<string, OrderPaidEvent['data']['promotion_allocations']>();
   for (const allocation of event.data.promotion_allocations ?? []) {
@@ -168,6 +195,8 @@ export function buildPnlOrderShopProjections(event: OrderPaidEvent, now = new Da
     return {
       orderId: event.data.order_id,
       shopOrderId: shop.shop_order_id ?? null,
+      paymentId: event.data.payment_id ?? null,
+      paymentStatus: event.data.payment_status ?? null,
       sourceEventId: event.event_id,
       shopId: shop.shop_id,
       currency: event.data.currency ?? 'MMK',
@@ -214,12 +243,37 @@ export async function upsertPnlOrderShopProjection(
   });
 }
 
+function assertCodProjectionMatches(
+  existing: Prisma.PnlOrderShopGetPayload<{}>,
+  expected: ReturnType<typeof buildPnlOrderShopProjections>[number],
+): void {
+  const moneyMatches = (left: Prisma.Decimal, right: number) =>
+    Math.round(Number(left.toString()) * 100) === Math.round(right * 100);
+  if (
+    (existing.paymentId && existing.paymentId !== expected.paymentId)
+    || (existing.paymentStatus && existing.paymentStatus !== 'COD')
+    || (existing.shopOrderId && existing.shopOrderId !== expected.shopOrderId)
+    || existing.currency !== expected.currency
+    || !moneyMatches(existing.grossItemSales, expected.grossItemSales)
+    || !moneyMatches(existing.discountTotal, expected.discountTotal)
+    || !moneyMatches(existing.shippingTotal, expected.shippingTotal)
+    || !moneyMatches(existing.paidAmount, expected.paidAmount)
+  ) {
+    throw new PermanentShipmentDeliveredEventError(
+      `Existing COD order projection conflicts with order.paid for shop ${expected.shopId}`,
+    );
+  }
+}
+
 type SettlementAllocation = {
   shop_id?: string | null;
   seller_id?: string | null;
   gross_amount: number;
   shipping_total?: number;
   net_payout?: number;
+  currency?: string;
+  payment_id?: string | null;
+  payment_status?: string | null;
 };
 
 async function savePaymentSettlement(
@@ -273,6 +327,77 @@ async function savePaymentSettlement(
   });
 }
 
+async function saveCodCollectionSettlement(
+  input: {
+    paymentId: string;
+    orderId?: string;
+    checkoutId?: string;
+    eventId: string;
+    currency?: string;
+    amount: number;
+  },
+  _allocations: SettlementAllocation[],
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const journals = await tx.journalEntry.findMany({
+      where: {
+        referenceType: 'COD_BANK_RECEIPT',
+        referenceId: { startsWith: `${input.paymentId}:` },
+        status: 'POSTED',
+      },
+      include: {
+        lines: { include: { account: { select: { code: true } } } },
+      },
+    });
+    const collectedByShop = new Map<string, number>();
+    for (const journal of journals) {
+      for (const line of journal.lines) {
+        if (line.account.code !== '1010' || line.direction !== 'DEBIT' || !line.shopId) continue;
+        if (input.currency && line.currency !== input.currency) {
+          throw new Error('COD collection currency does not match existing collection journals');
+        }
+        collectedByShop.set(
+          line.shopId,
+          (collectedByShop.get(line.shopId) ?? 0) + Math.round(Number(line.amount.toString()) * 100),
+        );
+      }
+    }
+    const totalCents = [...collectedByShop.values()].reduce((sum, value) => sum + value, 0);
+    const settlement = await tx.paymentSettlement.upsert({
+      where: { paymentReference: input.paymentId },
+      update: {
+        orderId: input.orderId ?? null,
+        checkoutId: input.checkoutId ?? null,
+        eventId: input.eventId,
+        currency: input.currency ?? 'MMK',
+        totalAmount: totalCents / 100,
+        sellerPayableAmount: totalCents / 100,
+      },
+      create: {
+        paymentReference: input.paymentId,
+        orderId: input.orderId ?? null,
+        checkoutId: input.checkoutId ?? null,
+        eventId: input.eventId,
+        currency: input.currency ?? 'MMK',
+        totalAmount: totalCents / 100,
+        sellerPayableAmount: totalCents / 100,
+      },
+    });
+    await tx.paymentSettlementLine.deleteMany({ where: { settlementId: settlement.id } });
+    if (collectedByShop.size > 0) {
+      await tx.paymentSettlementLine.createMany({
+        data: [...collectedByShop].map(([shopId, amountCents]) => ({
+          settlementId: settlement.id,
+          shopId,
+          grossAmount: amountCents / 100,
+          payableAmount: amountCents / 100,
+          currency: input.currency ?? 'MMK',
+        })),
+      });
+    }
+  });
+}
+
 async function getOrderShopSettlementAllocations(orderId: string): Promise<SettlementAllocation[]> {
   const projections = await prisma.pnlOrderShop.findMany({ where: { orderId } });
   return projections.map((row) => ({
@@ -280,6 +405,9 @@ async function getOrderShopSettlementAllocations(orderId: string): Promise<Settl
     gross_amount: Number(row.paidAmount.toString()),
     shipping_total: Number(row.shippingTotal.toString()),
     net_payout: Number(row.paidAmount.toString()),
+    currency: row.currency,
+    payment_id: row.paymentId,
+    payment_status: row.paymentStatus,
   }));
 }
 
@@ -289,6 +417,9 @@ async function getOrderShopRevenueAllocations(orderId: string): Promise<Settleme
     shop_id: row.shopId,
     gross_amount: Number(row.paidAmount.toString()),
     shipping_total: Number(row.shippingTotal.toString()),
+    currency: row.currency,
+    payment_id: row.paymentId,
+    payment_status: row.paymentStatus,
   }));
 }
 
@@ -296,12 +427,41 @@ function validateCollectedShopAllocations(
   event: PaymentCollectedEvent,
   projections: SettlementAllocation[],
 ) {
+  const projectionByShop = new Map(
+    projections.map((projection) => [projection.shop_id ?? '', projection]),
+  );
+  if (projectionByShop.size !== projections.length || projectionByShop.has('')) {
+    throw new Error('COD payment order projection requires unique shop allocations');
+  }
   const eventAllocations = new Map<string, number>();
   for (const allocation of event.data.shop_breakdown) {
     if (eventAllocations.has(allocation.shop_id)) {
       throw new Error('COD payment requires unique shop allocations');
     }
-    eventAllocations.set(allocation.shop_id, Math.round(allocation.gross_amount * 100));
+    const projection = projectionByShop.get(allocation.shop_id);
+    if (!projection) {
+      throw new Error('COD payment allocations do not match the order sales projection');
+    }
+    const allocatedCents = Math.round(allocation.gross_amount * 100);
+    if (allocatedCents <= 0 || allocatedCents !== Math.round(projection.gross_amount * 100)) {
+      throw new Error('COD payment allocation does not match the full order shop total');
+    }
+    eventAllocations.set(allocation.shop_id, allocatedCents);
+  }
+
+  if (projections.some((projection) =>
+    projection.payment_status === null || projection.payment_status === undefined,
+  )) {
+    throw new Error('COD payment order projection lacks payment status');
+  }
+  if (projections.some((projection) => projection.payment_status !== 'COD')) {
+    throw new Error('COD payment does not match a COD order projection');
+  }
+  if (projections.some((projection) => projection.payment_id !== event.data.payment_id)) {
+    throw new Error('COD payment ID does not match the order projection');
+  }
+  if (projections.some((projection) => projection.currency !== event.data.currency)) {
+    throw new Error('COD payment currency does not match the order sales projection');
   }
 
   const eventTotalCents = [...eventAllocations.values()].reduce((sum, amount) => sum + amount, 0);
@@ -309,11 +469,14 @@ function validateCollectedShopAllocations(
     throw new Error('COD payment allocation total does not match payment amount');
   }
 
+  if (eventAllocations.size === 0) {
+    throw new Error('COD payment requires shop allocations');
+  }
   if (
     eventAllocations.size !== projections.length
-    || projections.some((projection) =>
-      !projection.shop_id
-      || eventAllocations.get(projection.shop_id) !== Math.round(projection.gross_amount * 100),
+    || eventTotalCents !== projections.reduce(
+      (sum, projection) => sum + Math.round(projection.gross_amount * 100),
+      0,
     )
   ) {
     throw new Error('COD payment allocations do not match the order sales projection');
@@ -521,6 +684,18 @@ export const isPermanentError = (error: unknown): boolean => {
     || message.startsWith('COD payment requires unique shop allocations')
     || message.startsWith('COD payment allocation total does not match payment amount')
     || message.startsWith('COD payment allocations do not match the order sales projection')
+    || message.startsWith('COD payment does not match a COD order projection')
+    || message.startsWith('COD payment allocation does not match the full order shop total')
+    || message.startsWith('COD payment ID does not match the order projection')
+    || message.startsWith('COD payment currency does not match the order sales projection')
+    || message.startsWith('COD collection does not match posted receivable')
+    || message.startsWith('COD collection attribution does not match posted receivable')
+    || message.startsWith('COD collection currency does not match existing collection journals')
+    || message.startsWith('COD collection amount must be greater than zero')
+    || message.startsWith('COD collection amount does not match the full receivable')
+    || message.startsWith('COD receivable has a prior incomplete collection')
+    || message.startsWith('COD payment allocation exceeds the order shop total')
+    || message.startsWith('COD collection exceeds the remaining receivable')
     || message.startsWith('Payment allocation total does not match payment amount')
     || message.startsWith('Payment income requires shop allocations')
     || message.startsWith('Payment income requires shop sales and shipping allocations')
@@ -635,14 +810,42 @@ const processPaymentCompleted = async (event: PaymentCompletedEvent): Promise<vo
   console.log(`payment.completed accounted: ${event.data.payment_id}`);
 };
 
-const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
+export const processOrderPaid = async (
+  event: OrderPaidEvent,
+  database: Pick<typeof prisma, '$transaction'> = prisma,
+  codRevenueRecorder: typeof recordCodOrderRevenue = recordCodOrderRevenue,
+): Promise<void> => {
+  validateCodOrderPaidEvent(event);
   const projections = buildPnlOrderShopProjections(event);
 
-  await prisma.$transaction(async (tx) => {
+  await database.$transaction(async (tx) => {
     for (const projection of projections) {
+      if (projection.paymentStatus === 'COD') {
+        const existing = await tx.pnlOrderShop.findUnique({
+          where: {
+            orderId_shopId: {
+              orderId: projection.orderId,
+              shopId: projection.shopId,
+            },
+          },
+        });
+        if (existing) assertCodProjectionMatches(existing, projection);
+      }
       await upsertPnlOrderShopProjection(tx, projection);
     }
   });
+
+  if (event.data.payment_status === 'COD') {
+    for (const projection of projections) {
+      await codRevenueRecorder({
+        orderId: projection.orderId,
+        shopId: projection.shopId,
+        eventId: event.event_id,
+        entryDate: projection.orderPaidAt,
+      });
+    }
+    return;
+  }
 
   if (!shouldRecognizeOrderPaidIncome(event)) return;
 
@@ -679,11 +882,10 @@ const processOrderPaid = async (event: OrderPaidEvent): Promise<void> => {
 };
 
 export type PaymentCollectedProcessorDependencies = {
-  isAlreadyProcessed: (paymentId: string, eventId: string, journalEventId: string) => Promise<boolean>;
   getRevenueAllocations: typeof getOrderShopRevenueAllocations;
   recordBatchExpense: typeof recordCodCollectionBatchExpense;
-  saveJournal: typeof savePaymentJournal;
-  saveSettlement: typeof savePaymentSettlement;
+  recordBankReceiptJournals: typeof recordCodBankReceiptJournals;
+  saveSettlement: typeof saveCodCollectionSettlement;
 };
 
 export function buildCollectedPaymentJournalEventId(paymentId: string, eventId: string): string {
@@ -701,52 +903,17 @@ export function resolvePaymentJournalEventId(
   return existingEventId ?? proposedEventId;
 }
 
-async function isCollectedPaymentAlreadyProcessed(
-  paymentId: string,
-  eventId: string,
-  journalEventId: string,
-): Promise<boolean> {
-  const [journal, settlement] = await Promise.all([
-    prisma.journalEntry.findFirst({
-      where: { referenceType: 'PAYMENT', referenceId: paymentId },
-      select: { eventId: true },
-    }),
-    prisma.paymentSettlement.findUnique({
-      where: { paymentReference: paymentId },
-      select: { eventId: true },
-    }),
-  ]);
-
-  return (
-    (journal?.eventId === eventId || journal?.eventId === journalEventId)
-    && settlement?.eventId === eventId
-  );
-}
-
 const collectedPaymentProcessorDependencies: PaymentCollectedProcessorDependencies = {
-  isAlreadyProcessed: isCollectedPaymentAlreadyProcessed,
   getRevenueAllocations: getOrderShopRevenueAllocations,
   recordBatchExpense: recordCodCollectionBatchExpense,
-  saveJournal: savePaymentJournal,
-  saveSettlement: savePaymentSettlement,
+  recordBankReceiptJournals: recordCodBankReceiptJournals,
+  saveSettlement: saveCodCollectionSettlement,
 };
 
 export const processPaymentCollected = async (
   event: PaymentCollectedEvent,
   dependencies: PaymentCollectedProcessorDependencies = collectedPaymentProcessorDependencies,
 ): Promise<void> => {
-  const paymentJournalEventId = buildCollectedPaymentJournalEventId(
-    event.data.payment_id,
-    event.event_id,
-  );
-  if (await dependencies.isAlreadyProcessed(
-    event.data.payment_id,
-    event.event_id,
-    paymentJournalEventId,
-  )) {
-    return;
-  }
-
   if (!event.data.order_id) {
     if (event.data.delivery_expense_group) {
       throw new PermanentShipmentDeliveredEventError('Collect COD batch event is missing its order ID');
@@ -761,13 +928,31 @@ export const processPaymentCollected = async (
   validateCollectedShopAllocations(event, revenueAllocations);
 
   const expenseGroup = event.data.delivery_expense_group;
-  if (expenseGroup) {
-    if (
+  if (
+    expenseGroup
+    && (
       !expenseGroup.order_ids.includes(event.data.order_id)
       || !event.data.shop_breakdown.some((row) => row.shop_id === expenseGroup.shop_id)
-    ) {
-      throw new PermanentShipmentDeliveredEventError('Collect COD event does not match its shop and batch order attribution');
-    }
+    )
+  ) {
+    throw new PermanentShipmentDeliveredEventError('Collect COD event does not match its shop and batch order attribution');
+  }
+
+  await dependencies.recordBankReceiptJournals(
+    event.data.shop_breakdown.map((row) => {
+      const projection = revenueAllocations.find((allocation) => allocation.shop_id === row.shop_id);
+      return {
+        orderId: event.data.order_id!,
+        shopId: row.shop_id,
+        paymentId: event.data.payment_id,
+        amount: row.gross_amount,
+        currency: event.data.currency ?? projection?.currency ?? 'MMK',
+      };
+    }),
+    event.event_id,
+  );
+
+  if (expenseGroup) {
     await dependencies.recordBatchExpense({
       groupId: expenseGroup.group_id,
       shopId: expenseGroup.shop_id,
@@ -776,23 +961,6 @@ export const processPaymentCollected = async (
       effectiveAt: new Date(expenseGroup.effective_at),
     }, event.event_id);
   }
-
-  const paymentContext: PaymentJournalContext = {
-    payment_id: event.data.payment_id,
-    order_id: event.data.order_id,
-    checkout_id: event.data.checkout_id,
-    amount: event.data.amount,
-    currency: event.data.currency,
-  };
-  await dependencies.saveJournal({
-    referenceType: 'PAYMENT',
-    referenceId: event.data.payment_id,
-    eventId: paymentJournalEventId,
-    narration: event.data.order_id
-      ? `Collected COD payment for order ${event.data.order_id}`
-      : 'Collected COD payment',
-    lines: buildCollectedPaymentJournalLines(paymentContext, revenueAllocations),
-  });
 
   await dependencies.saveSettlement({
     paymentId: event.data.payment_id,

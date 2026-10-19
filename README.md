@@ -33,14 +33,24 @@ curl http://localhost:4005/health
 
 ## Payment accounting integration
 
-The accounting consumer listens for `payment.completed`, `payment.collected`, and `order.paid` on the existing `order_events` exchange. `payment.completed` recognizes successful non-COD payments; a COD completion is deferred. COD revenue is recognized only from the payment service's `payment.collected` event, which requires COD attribution, a collection timestamp, and per-shop allocations. `order.paid` creates/updates shop sales projections but never recognizes COD income; non-COD income is written only when a posted payment settlement already exists. For local Docker testing, point `PAYMENT_RABBITMQ_URL` at the same RabbitMQ broker configured in `payment-service/.env` before starting the accounting service:
+The accounting consumer listens for `payment.completed`, `payment.collected`, and `order.paid` on the existing `order_events` exchange. `payment.completed` recognizes successful non-COD payments; a COD completion is deferred. In the COD checkout flow, Order Service authorizes the COD payment after address and shipping totals are finalized, creates the order, and then emits `order.paid` with `payment_status: COD`, payment identity, currency, and per-shop totals. Accounting uses that event to debit COD Receivable (`1200`) and credit Revenue (`4000`) once per order/shop. The separate `order.created` checkout event is not sufficient evidence: it has no order ID or COD/payment status and precedes authoritative order/shop allocations.
+
+The Delivery Service emits `shipment.delivered` with order, shop, and delivery timestamps. Accounting resolves the COD amount, currency, payment identity, and order/shop attribution from the existing `PnlOrderShop` projection, verifies the posted COD revenue journal, then debits COD Collection Clearing (`1210`) and credits COD Receivable (`1200`) once per order/shop. This delivery-stage transfer does not credit revenue again.
+
+When the Shop Admin uses the existing **Collect COD orders** action, Payment Service records the COD payment as `COLLECTED` and emits `payment.collected` with payment/order IDs, total amount, currency, full per-shop allocations, and collection time. Accounting uses this event as the requested final bank-receipt trigger, validates those values against the COD projection and prior delivery-stage clearing journal, and debits Bank Account (`1010`) / credits COD Collection Clearing (`1210`) once per payment/shop. Collection events arriving before delivery accounting are retried. Stable operation references and transaction-scoped locks protect against duplicate events. COD order revenue remains a separate `order.paid` journal: debit COD Receivable (`1200`) / credit Revenue (`4000`).
+
+Account `1010` is seeded as Bank Account and is added by the COD bank-account migration when absent.
+
+For local Docker testing, configure the Payment Service broker URL as described below:
 
 ```powershell
 $env:PAYMENT_RABBITMQ_URL = (Get-Content ..\payment-service\.env | Where-Object { $_ -match '^RABBITMQ_URL=' }).Split('=', 2)[1] -replace '@rabbitmq(?=:)', '@orderservice-rabbitmq'
 docker compose up -d --build
 ```
 
-The consumer uses the durable queue `accounting.payment_completed`, binds it to all three routing keys, and sends malformed, unsupported, or permanently invalid messages to `accounting.payment_completed.dlq`. Successful events create balanced entries with Cash (`1000`) debited and Revenue (`4000`) credited. COD collection credits Revenue separately for each allocated shop. The event ID and payment reference prevent duplicate journal entries.
+The consumer uses the durable queue `accounting.payment_completed`, binds it to all three routing keys, and sends malformed, unsupported, or permanently invalid messages to `accounting.payment_completed.dlq`. COD journals retain currency and shop attribution on each line. Collection arriving before COD order recognition is retryable; projection or allocation mismatches are rejected rather than posted.
+
+Order projections created before COD payment metadata was stored have no reliable payment status or payment ID. Replay their original `order.paid` events through the Accounting consumer to establish the COD attribution and recognition journal before processing COD collection; projection-only recovery does not create that journal. Accounting does not guess that an unknown status is non-COD.
 
 Production and staging deployments must run an image built from the current Accounting Service source. The consumer dispatches `payment.completed`, `payment.collected`, and `order.paid` by each payload's `event` field; an older image that assumes every message is `payment.completed` will reject the other two event types. Set all three routing keys in the deployment environment and rebuild/redeploy the image when updating the consumer.
 
@@ -62,7 +72,7 @@ Accounting uses canonical shop and Delivery Company IDs. A delivery with missing
 
 For `PER_ORDER`, Accounting records one charge per shop/company/order. For `PER_INVOICE`, one Collect COD batch creates one charge per shop/company/group using the configured fee once, and the expense links every order in that group. Different batches remain separate even when collected on the same day. Stable references and a transaction-scoped PostgreSQL advisory lock prevent duplicate expense and journal creation on retries or concurrent events. Each accepted charge creates an approved expense and a balanced debit to Operating Expenses (`5000`) and credit to Cash (`1000`).
 
-Journal lines do not currently have a currency field, so their amounts follow the existing accounting convention and are not currency-converted; mixed-currency journal reporting is therefore not represented at the line level.
+Journal lines retain currency and optional shop attribution. Amounts are not currency-converted; mixed-currency journal reporting must keep currency in view.
 
 ## Journal-entry CQRS projection
 

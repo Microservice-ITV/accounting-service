@@ -2,16 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   buildCollectedPaymentJournalEventId,
+  buildPnlOrderShopProjections,
   buildOrderPaidPaymentJournalEventId,
   isPermanentError,
   normalizeOrderPaidEvent,
   normalizePaymentCompletedEvent,
   normalizePaymentCollectedEvent,
   normalizePaymentEvent,
+  processOrderPaid,
   processPaymentCollected,
   resolvePaymentJournalEventId,
   shouldRecognizeOrderPaidIncome,
   shouldRecognizePaymentEvent,
+  validateCodOrderPaidEvent,
   type PaymentCollectedProcessorDependencies,
 } from './payment.consumer.js';
 
@@ -46,6 +49,9 @@ test('payment event dispatcher selects schemas by the event name', () => {
     data: {
       payment_id: payments[0],
       amount: 100,
+      currency: 'MMK',
+      payment_method: 'cod',
+      collected_at: '2026-10-09T03:24:34.000Z',
       shop_breakdown: [{ shop_id: 'shop-a', gross_amount: 100 }],
     },
   });
@@ -159,6 +165,75 @@ test('payment.collected requires explicit COD collection and validates amount an
   }));
 });
 
+test('COD collection must match COD payment, shop, and currency attribution', async () => {
+  const missingProjection = createHarness();
+  missingProjection.dependencies.getRevenueAllocations = async () => [];
+  await assert.rejects(
+    processPaymentCollected(collectedEvent(0), missingProjection.dependencies),
+    /Order sales projection missing for collected COD payment/,
+  );
+
+  const nonCod = createHarness();
+  nonCod.dependencies.getRevenueAllocations = async () => [{
+    shop_id: 'shop-a',
+    gross_amount: 100,
+    shipping_total: 0,
+    payment_id: payments[0],
+    payment_status: 'PAID',
+    currency: 'MMK',
+  }];
+  await assert.rejects(
+    processPaymentCollected(collectedEvent(0), nonCod.dependencies),
+    /does not match a COD order projection/,
+  );
+
+  const currencyMismatch = createHarness();
+  currencyMismatch.dependencies.getRevenueAllocations = async () => [{
+    shop_id: 'shop-a',
+    gross_amount: 100,
+    shipping_total: 0,
+    payment_id: payments[0],
+    payment_status: 'COD',
+    currency: 'USD',
+  }];
+  await assert.rejects(
+    processPaymentCollected(collectedEvent(0), currencyMismatch.dependencies),
+    /currency does not match the order sales projection/,
+  );
+
+  const paymentMismatch = createHarness();
+  paymentMismatch.dependencies.getRevenueAllocations = async () => [{
+    shop_id: 'shop-a',
+    gross_amount: 100,
+    shipping_total: 0,
+    payment_id: payments[1],
+    payment_status: 'COD',
+    currency: 'MMK',
+  }];
+  await assert.rejects(
+    processPaymentCollected(collectedEvent(0), paymentMismatch.dependencies),
+    /payment ID does not match the order projection/,
+  );
+
+  const shopMismatch = createHarness();
+  shopMismatch.dependencies.getRevenueAllocations = async () => [{
+    shop_id: 'shop-other',
+    gross_amount: 100,
+    shipping_total: 0,
+    payment_id: payments[0],
+    payment_status: 'COD',
+    currency: 'MMK',
+  }];
+  await assert.rejects(
+    processPaymentCollected(collectedEvent(0), shopMismatch.dependencies),
+    /allocations do not match the order sales projection/,
+  );
+
+  assert.equal(isPermanentError(new Error(
+    'COD payment allocation does not match the full order shop total',
+  )), true);
+});
+
 test('order.paid accepts ORDER_PAID and does not recognize COD as collected income', () => {
   const paidEvent = orderPaidEvent('PAID');
   const codOrderEvent = orderPaidEvent('COD');
@@ -166,6 +241,95 @@ test('order.paid accepts ORDER_PAID and does not recognize COD as collected inco
   assert.equal(paidEvent.data.status, 'ORDER_PAID');
   assert.equal(shouldRecognizeOrderPaidIncome(paidEvent), true);
   assert.equal(shouldRecognizeOrderPaidIncome(codOrderEvent), false);
+});
+
+test('order.paid posts COD revenue from authoritative per-shop order totals, not order.created', async () => {
+  const upserted: Array<{ create: Record<string, unknown> }> = [];
+  const recognized: Array<{ orderId: string; shopId: string; eventId: string; entryDate: Date }> = [];
+  const tx = {
+    pnlOrderShop: {
+      findUnique: async () => null,
+      upsert: async (input: { create: Record<string, unknown> }) => {
+        upserted.push(input);
+        return {};
+      },
+    },
+  };
+  const database = {
+    $transaction: async <T>(work: (transaction: typeof tx) => Promise<T>) => work(tx),
+  } as unknown as Parameters<typeof processOrderPaid>[1];
+
+  await processOrderPaid(
+    orderPaidEvent('COD'),
+    database,
+    async (input) => { recognized.push(input); },
+  );
+
+  assert.equal(upserted.length, 1);
+  assert.equal(upserted[0]?.create.paymentStatus, 'COD');
+  assert.equal(upserted[0]?.create.paymentId, payments[0]);
+  assert.equal(upserted[0]?.create.paidAmount, 100);
+  assert.deepEqual(recognized.map((row) => [row.orderId, row.shopId, row.eventId]), [
+    [orders[0], 'shop-a', firstEventId],
+  ]);
+});
+
+test('order.paid refuses to overwrite conflicting COD projection totals', async () => {
+  let upserts = 0;
+  const tx = {
+    pnlOrderShop: {
+      findUnique: async () => ({
+        paymentId: payments[0],
+        paymentStatus: 'COD',
+        shopOrderId: null,
+        currency: 'MMK',
+        grossItemSales: { toString: () => '100' },
+        discountTotal: { toString: () => '0' },
+        shippingTotal: { toString: () => '0' },
+        paidAmount: { toString: () => '99' },
+      }),
+      upsert: async () => { upserts += 1; return {}; },
+    },
+  };
+  const database = {
+    $transaction: async <T>(work: (transaction: typeof tx) => Promise<T>) => work(tx),
+  } as unknown as Parameters<typeof processOrderPaid>[1];
+
+  await assert.rejects(
+    processOrderPaid(orderPaidEvent('COD'), database, async () => {}),
+    /projection conflicts with order\.paid/,
+  );
+  assert.equal(upserts, 0);
+});
+
+test('COD order.paid requires payment identity, currency, and matching unique shop totals', () => {
+  const event = orderPaidEvent('COD');
+  assert.doesNotThrow(() => validateCodOrderPaidEvent(event));
+  assert.throws(() => validateCodOrderPaidEvent({
+    ...event,
+    data: { ...event.data, payment_id: undefined },
+  }), /requires payment_id, currency, and order amount/);
+  assert.throws(() => validateCodOrderPaidEvent({
+    ...event,
+    data: {
+      ...event.data,
+      shop_breakdown: [
+        ...event.data.shop_breakdown,
+        { ...event.data.shop_breakdown[0]!, shop_id: 'shop-b' },
+      ],
+    },
+  }), /shop totals do not match/);
+  assert.throws(() => validateCodOrderPaidEvent({
+    ...event,
+    data: {
+      ...event.data,
+      shop_breakdown: [
+        event.data.shop_breakdown[0]!,
+        event.data.shop_breakdown[0]!,
+      ],
+      amount: 200,
+    },
+  }), /duplicate shop allocations/);
 });
 
 test('unsupported events and invalid payment statuses are permanent schema errors', () => {
@@ -193,8 +357,21 @@ test('unsupported events and invalid payment statuses are permanent schema error
 });
 
 function createHarness(options: { committedExpense?: boolean; failFirstSettlement?: boolean } = {}) {
-  const paymentJournals = new Map<string, { eventId: string; lines: unknown[] }>();
-  const paymentSettlements = new Map<string, { eventId: string; amount: number; allocations: unknown[] }>();
+  const collectionJournals = new Map<string, {
+    eventId: string;
+    lines: Array<{
+      accountCode: string;
+      direction: string;
+      amount: number;
+      currency: string;
+      shopId: string;
+    }>;
+  }>();
+  const paymentSettlements = new Map<string, {
+    eventId: string;
+    amount: number;
+    allocations: Array<{ shop_id: string; gross_amount: number }>;
+  }>();
   const journalEventIds = new Map<string, string>();
   const expenseOrderMembership = new Set(options.committedExpense ? orders : []);
   let expenseCount = options.committedExpense ? 1 : 0;
@@ -206,13 +383,13 @@ function createHarness(options: { committedExpense?: boolean; failFirstSettlemen
   }
 
   const dependencies: PaymentCollectedProcessorDependencies = {
-    isAlreadyProcessed: async (paymentId, eventId, journalEventId) =>
-      paymentJournals.get(paymentId)?.eventId === journalEventId
-      && paymentSettlements.get(paymentId)?.eventId === eventId,
-    getRevenueAllocations: async () => [{
+    getRevenueAllocations: async (orderId) => [{
       shop_id: 'shop-a',
       gross_amount: 100,
       shipping_total: 0,
+      payment_id: payments[orders.indexOf(orderId)],
+      payment_status: 'COD',
+      currency: 'MMK',
     }],
     recordBatchExpense: async (input, eventId) => {
       if (expenseCount > 0) return;
@@ -221,31 +398,64 @@ function createHarness(options: { committedExpense?: boolean; failFirstSettlemen
       journalEventIds.set(eventId, 'EXPENSE:cod-batch');
       input.orderIds.forEach((orderId) => expenseOrderMembership.add(orderId));
     },
-    saveJournal: async (input) => {
-      const existingOwner = journalEventIds.get(input.eventId);
-      assert.ok(
-        existingOwner === undefined || existingOwner === `PAYMENT:${input.referenceId}`,
-        `Journal event ID ${input.eventId} collides with ${existingOwner}`,
-      );
-      journalEventIds.set(input.eventId, `PAYMENT:${input.referenceId}`);
-      paymentJournals.set(input.referenceId, { eventId: input.eventId, lines: input.lines });
+    recordBankReceiptJournals: async (allocations, eventId) => {
+      for (const allocation of allocations) {
+        const referenceId = `${allocation.paymentId}:${allocation.shopId}`;
+        const collectionEventId = `payment.collected:cod-bank-receipt:${allocation.paymentId}:${allocation.shopId}`;
+        const existingOwner = journalEventIds.get(collectionEventId);
+        assert.ok(
+          existingOwner === undefined || existingOwner === `COD_BANK_RECEIPT:${referenceId}`,
+          `Journal event ID ${collectionEventId} collides with ${existingOwner}`,
+        );
+        journalEventIds.set(collectionEventId, `COD_BANK_RECEIPT:${referenceId}`);
+        if (!collectionJournals.has(referenceId)) {
+          collectionJournals.set(referenceId, {
+            eventId,
+            lines: [{
+              accountCode: '1010',
+              direction: 'DEBIT',
+              amount: allocation.amount,
+              currency: allocation.currency,
+              shopId: allocation.shopId,
+            }, {
+              accountCode: '1210',
+              direction: 'CREDIT',
+              amount: allocation.amount,
+              currency: allocation.currency,
+              shopId: allocation.shopId,
+            }],
+          });
+        }
+      }
     },
-    saveSettlement: async (input, allocations) => {
+    saveSettlement: async (input) => {
       settlementAttempts += 1;
       if (options.failFirstSettlement && settlementAttempts === 1) {
         throw new Error('simulated transient settlement failure');
       }
+      const allocationsByShop = new Map<string, number>();
+      let totalAmount = 0;
+      for (const [reference, journal] of collectionJournals) {
+        if (!reference.startsWith(`${input.paymentId}:`)) continue;
+        const debit = journal.lines.find((line) => line.accountCode === '1010');
+        if (!debit) continue;
+        totalAmount += debit.amount;
+        allocationsByShop.set(
+          debit.shopId,
+          (allocationsByShop.get(debit.shopId) ?? 0) + debit.amount,
+        );
+      }
       paymentSettlements.set(input.paymentId, {
         eventId: input.eventId,
-        amount: input.amount,
-        allocations,
+        amount: totalAmount,
+        allocations: [...allocationsByShop].map(([shop_id, gross_amount]) => ({ shop_id, gross_amount })),
       });
     },
   };
 
   return {
     dependencies,
-    paymentJournals,
+    collectionJournals,
     paymentSettlements,
     expenseOrderMembership,
     get expenseCount() { return expenseCount; },
@@ -254,29 +464,30 @@ function createHarness(options: { committedExpense?: boolean; failFirstSettlemen
   };
 }
 
-test('accounts all five COD payments when the first event ID is already on the committed batch expense journal', async () => {
+test('accounts all five COD bank receipts without creating receipt revenue journals', async () => {
   const harness = createHarness({ committedExpense: true });
 
   for (let index = 0; index < orders.length; index += 1) {
     await processPaymentCollected(collectedEvent(index), harness.dependencies);
   }
 
-  assert.equal(harness.paymentJournals.size, 5);
+  assert.equal(harness.collectionJournals.size, 5);
   assert.equal(harness.paymentSettlements.size, 5);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
   assert.deepEqual([...harness.expenseOrderMembership].sort(), [...orders].sort());
   assert.deepEqual(
-    [...harness.paymentJournals.keys()].sort(),
+    [...harness.collectionJournals.keys()].map((reference) => reference.split(':')[0]).sort(),
     [...payments].sort(),
   );
   assert.equal(
-    harness.paymentJournals.get(payments[0])?.eventId,
-    buildCollectedPaymentJournalEventId(payments[0], firstEventId),
-  );
-  assert.notEqual(
-    harness.paymentJournals.get(payments[0])?.eventId,
+    harness.collectionJournals.get(`${payments[0]}:shop-a`)?.eventId,
     firstEventId,
+  );
+  assert.deepEqual(
+    harness.collectionJournals.get(`${payments[0]}:shop-a`)?.lines.map((line) =>
+      [line.accountCode, line.direction]),
+    [['1010', 'DEBIT'], ['1210', 'CREDIT']],
   );
   for (const paymentId of payments) {
     assert.equal(harness.paymentSettlements.get(paymentId)?.amount, 100);
@@ -289,29 +500,77 @@ test('a fully processed duplicate COD event creates no additional records or all
   const event = collectedEvent(0);
 
   await processPaymentCollected(event, harness.dependencies);
-  const journal = harness.paymentJournals.get(payments[0]);
+  const journal = harness.collectionJournals.get(`${payments[0]}:shop-a`);
   const settlement = harness.paymentSettlements.get(payments[0]);
   await processPaymentCollected(event, harness.dependencies);
 
-  assert.equal(harness.paymentJournals.size, 1);
+  assert.equal(harness.collectionJournals.size, 1);
   assert.equal(harness.paymentSettlements.size, 1);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
-  assert.equal(harness.paymentJournals.get(payments[0]), journal);
-  assert.equal(harness.paymentSettlements.get(payments[0]), settlement);
+  assert.equal(harness.collectionJournals.get(`${payments[0]}:shop-a`), journal);
+  assert.deepEqual(harness.paymentSettlements.get(payments[0]), settlement);
 });
 
-test('a duplicate COD collection creates its batch expense, income journal, and settlement only once', async () => {
+test('republishing payment.collected with a new event ID does not create another bank journal', async () => {
+  const harness = createHarness();
+  await processPaymentCollected(collectedEvent(0), harness.dependencies);
+  await processPaymentCollected({
+    ...collectedEvent(0),
+    event_id: 'republished-payment-collected',
+  }, harness.dependencies);
+
+  assert.equal(harness.collectionJournals.size, 1);
+  assert.equal(harness.paymentSettlements.size, 1);
+});
+
+test('a duplicate COD bank receipt creates its batch expense, bank journal, and settlement only once', async () => {
   const harness = createHarness();
   const event = collectedEvent(0);
 
   await processPaymentCollected(event, harness.dependencies);
   await processPaymentCollected(event, harness.dependencies);
 
-  assert.equal(harness.paymentJournals.size, 1);
+  assert.equal(harness.collectionJournals.size, 1);
   assert.equal(harness.paymentSettlements.size, 1);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
+});
+
+test('partial COD collection amounts are rejected and full collection is posted once', async () => {
+  const harness = createHarness();
+  const partial = collectedEvent(0);
+  partial.event_id = 'partial-collection';
+  partial.data.amount = 40;
+  partial.data.shop_breakdown = [{ shop_id: 'shop-a', gross_amount: 40 }];
+  await assert.rejects(
+    processPaymentCollected(partial, harness.dependencies),
+    /does not match the full order shop total/,
+  );
+  assert.equal(harness.collectionJournals.size, 0);
+
+  const full = collectedEvent(0);
+  await processPaymentCollected(full, harness.dependencies);
+  await processPaymentCollected(full, harness.dependencies);
+
+  assert.equal(harness.collectionJournals.size, 1);
+  assert.equal(harness.paymentSettlements.get(payments[0])?.amount, 100);
+  assert.equal(
+    harness.paymentSettlements.get(payments[0])?.allocations[0]?.gross_amount,
+    100,
+  );
+});
+
+test('payment.collected debits the bank and credits COD clearing, not seller payable', async () => {
+  const harness = createHarness();
+  await processPaymentCollected(collectedEvent(0), harness.dependencies);
+
+  const journal = harness.collectionJournals.get(`${payments[0]}:shop-a`);
+  assert.deepEqual(
+    journal?.lines.map((line) => [line.accountCode, line.direction]),
+    [['1010', 'DEBIT'], ['1210', 'CREDIT']],
+  );
+  assert.equal(journal?.lines.some((line) => line.accountCode === '2100'), false);
 });
 
 test('order-paid income journal event IDs are operation-scoped and preserve existing journal IDs', () => {
@@ -324,7 +583,7 @@ test('order-paid income journal event IDs are operation-scoped and preserve exis
   assert.equal(resolvePaymentJournalEventId(null, orderPaidId), orderPaidId);
 });
 
-test('a retry after the batch expense and payment journal commit completes the missing settlement', async () => {
+test('a retry after bank journal commit completes the missing settlement projection', async () => {
   const harness = createHarness({ committedExpense: true, failFirstSettlement: true });
   const event = collectedEvent(0);
 
@@ -332,12 +591,12 @@ test('a retry after the batch expense and payment journal commit completes the m
     processPaymentCollected(event, harness.dependencies),
     /simulated transient settlement failure/,
   );
-  assert.equal(harness.paymentJournals.size, 1);
+  assert.equal(harness.collectionJournals.size, 1);
   assert.equal(harness.paymentSettlements.size, 0);
 
   await processPaymentCollected(event, harness.dependencies);
 
-  assert.equal(harness.paymentJournals.size, 1);
+  assert.equal(harness.collectionJournals.size, 1);
   assert.equal(harness.paymentSettlements.size, 1);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
@@ -345,9 +604,9 @@ test('a retry after the batch expense and payment journal commit completes the m
   assert.equal(harness.paymentSettlements.get(payments[0])?.allocations.length, 1);
 });
 
-test('a payment journal unique-key collision is propagated for retry rather than acknowledged as a duplicate', async () => {
+test('a COD bank journal unique-key collision is propagated for retry', async () => {
   const harness = createHarness({ committedExpense: true });
-  harness.dependencies.saveJournal = async () => {
+  harness.dependencies.recordBankReceiptJournals = async () => {
     throw Object.assign(new Error('unique constraint violation'), {
       code: 'P2002',
       meta: { target: ['eventId'] },
@@ -357,7 +616,7 @@ test('a payment journal unique-key collision is propagated for retry rather than
   await assert.rejects(processPaymentCollected(collectedEvent(0), harness.dependencies), {
     code: 'P2002',
   });
-  assert.equal(harness.paymentJournals.size, 0);
+  assert.equal(harness.collectionJournals.size, 0);
   assert.equal(harness.paymentSettlements.size, 0);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
