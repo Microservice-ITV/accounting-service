@@ -21,5 +21,6 @@ export const config = {
   accountingEventsExchange: process.env.ACCOUNTING_EVENTS_EXCHANGE || 'accounting.events',
   accountingJournalEntryRoutingKey:
     process.env.ACCOUNTING_JOURNAL_ENTRY_ROUTING_KEY || 'accounting.journal-entry.upserted',
+  shippingServiceBaseUrl: process.env.SHIPPING_SERVICE_BASE_URL?.trim(),
   nodeEnv: process.env.NODE_ENV || 'development',
 };

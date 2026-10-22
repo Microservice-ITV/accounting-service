@@ -2,15 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Prisma } from '@prisma/client';
 import type { AuthenticatedExpenseContext } from '../../middleware/auth.js';
+import type { IDeliveryCompanyFeeRepository } from './interfaces/delivery-company-fee.repository.interface.js';
+import { DeliveryCompanyFeeAuthorizationPolicy } from './policies/delivery-company-fee-authorization.policy.js';
+import { DeliveryCompanyFeeService } from './services/delivery-company-fee.service.js';
 import {
-  assertDeliveryCompanyFeeShopAccess,
-  createDeliveryCompanyFee,
-  getDeliveryCompanyFee,
-  listActiveShopDeliveryCompanyConfigurations,
-  listDeliveryCompanyFees,
-  setDeliveryCompanyFeeActive,
-  updateDeliveryCompanyFee,
-} from './delivery-company-fee.service.js';
+  DeliveryCompanyFeeApplicationError,
+} from './errors/delivery-company-fee.error.js';
+import { deliveryCompanyFeeSchema } from './dto/delivery-company-fee.dto.js';
 
 const SHOP_ID = 'shop-1';
 const COMPANY_ID = 'royal-company';
@@ -39,43 +37,76 @@ function mockDatabase() {
     ...input,
     amount: new Prisma.Decimal(input.amount),
     createdAt: new Date('2026-10-10T00:00:00.000Z'),
+    updatedAt: new Date('2026-10-10T00:00:00.000Z'),
   };
-  const database = {
-    deliveryCompanyFee: {
-      findUnique: async (args: unknown) => {
-        calls.push({ method: 'findUnique', args });
-        return feeRule;
-      },
-      findMany: async (args: unknown) => {
-        calls.push({ method: 'findMany', args });
-        return [feeRule];
-      },
-      create: async (args: unknown) => {
-        calls.push({ method: 'create', args });
-        return feeRule;
-      },
-      update: async (args: unknown) => {
-        calls.push({ method: 'update', args });
-        return feeRule;
-      },
+  const repository: IDeliveryCompanyFeeRepository = {
+    findById: async (id) => {
+      calls.push({ method: 'findUnique', args: { where: { id } } });
+      return feeRule;
+    },
+    listByShopIds: async (shopIds) => {
+      calls.push({
+        method: 'findMany',
+        args: {
+          where: { shopId: { in: shopIds }, deliveryCompanyId: { not: null } },
+          orderBy: [{ shopId: 'asc' }, { deliveryCompanyId: 'asc' }, { effectiveFrom: 'desc' }, { createdAt: 'desc' }],
+        },
+      });
+      return [feeRule];
+    },
+    create: async (data) => {
+      calls.push({ method: 'create', args: { data } });
+      return feeRule;
+    },
+    update: async (id, data) => {
+      calls.push({ method: 'update', args: { where: { id }, data } });
+      return feeRule;
+    },
+    listActiveConfigurations: async (shopId, now) => {
+      calls.push({
+        method: 'findMany',
+        args: {
+          where: {
+            shopId,
+            deliveryCompanyId: { not: null },
+            active: true,
+            AND: [
+              { OR: [{ effectiveFrom: null }, { effectiveFrom: { lte: now } }] },
+              { OR: [{ effectiveTo: null }, { effectiveTo: { gt: now } }] },
+            ],
+          },
+          select: { deliveryCompanyId: true },
+          orderBy: [{ deliveryCompanyId: 'asc' }, { effectiveFrom: 'desc' }],
+        },
+      });
+      return [{ deliveryCompanyId: COMPANY_ID }];
+    },
+    hasActiveConfiguration: async (shopId, deliveryCompanyId, now) => {
+      calls.push({
+        method: 'findFirst',
+        args: { shopId, deliveryCompanyId, now },
+      });
+      return true;
     },
   };
-  return { calls, feeRule, database: database as never };
+  return { calls, feeRule, repository };
 }
 
 const validMapping = async () => undefined;
 
 test('limits seller configuration access to shops assigned by Auth Service', () => {
-  assert.doesNotThrow(() => assertDeliveryCompanyFeeShopAccess(seller, SHOP_ID));
+  const policy = new DeliveryCompanyFeeAuthorizationPolicy();
+  assert.doesNotThrow(() => policy.requireShopAccess(seller, SHOP_ID));
   assert.throws(
-    () => assertDeliveryCompanyFeeShopAccess(seller, 'another-shop'),
+    () => policy.requireShopAccess(seller, 'another-shop'),
     /not authorized for the selected shop/,
   );
 });
 
 test('creates a fee rule using only shop and canonical company identity', async () => {
-  const { calls, database } = mockDatabase();
-  const result = await createDeliveryCompanyFee(input, seller, database, validMapping);
+  const { calls, repository } = mockDatabase();
+  const service = new DeliveryCompanyFeeService(repository, undefined, validMapping);
+  const result = await service.create(input, seller);
 
   assert.equal(result.id, 'fee-1');
   assert.equal(calls[0].method, 'create');
@@ -87,8 +118,8 @@ test('creates a fee rule using only shop and canonical company identity', async 
 });
 
 test('lists only fee configurations for shops assigned to the seller', async () => {
-  const { calls, database } = mockDatabase();
-  await listDeliveryCompanyFees(seller, database);
+  const { calls, repository } = mockDatabase();
+  await new DeliveryCompanyFeeService(repository).list(seller);
 
   assert.deepEqual(calls[0], {
     method: 'findMany',
@@ -100,73 +131,115 @@ test('lists only fee configurations for shops assigned to the seller', async () 
 });
 
 test('lists only active Delivery Company identities for checkout', async () => {
-  const calls: Array<{ method: string; args: unknown }> = [];
-  const database = {
-    deliveryCompanyFee: {
-      findMany: async (args: unknown) => {
-        calls.push({ method: 'findMany', args });
-        return [{ deliveryCompanyId: COMPANY_ID }];
-      },
-    },
-  } as never;
-
-  const configurations = await listActiveShopDeliveryCompanyConfigurations(SHOP_ID, database);
+  const { calls, repository } = mockDatabase();
+  const configurations = await new DeliveryCompanyFeeService(repository).listActiveConfigurations(SHOP_ID);
 
   assert.deepEqual(configurations, [{ deliveryCompanyId: COMPANY_ID }]);
-  const args = calls[0].args as {
-    where: { shopId: string; deliveryCompanyId: { not: null }; active: boolean; AND: unknown[] };
-    select: { deliveryCompanyId: boolean };
-    orderBy: unknown[];
-  };
-  assert.equal(args.where.shopId, SHOP_ID);
-  assert.deepEqual(args.where.deliveryCompanyId, { not: null });
-  assert.equal(args.where.active, true);
-  assert.equal(args.where.AND.length, 2);
-  assert.deepEqual(args.select, { deliveryCompanyId: true });
-  assert.deepEqual(args.orderBy, [{ deliveryCompanyId: 'asc' }, { effectiveFrom: 'desc' }]);
+  assert.equal(calls[0].method, 'findMany');
+  assert.deepEqual((calls[0].args as { where: { shopId: string } }).where.shopId, SHOP_ID);
 });
 
 test('loads a fee rule by ID only when it belongs to an authorized shop', async () => {
-  const { calls, database, feeRule } = mockDatabase();
-  const result = await getDeliveryCompanyFee('fee-1', seller, database);
+  const { calls, repository, feeRule } = mockDatabase();
+  const service = new DeliveryCompanyFeeService(repository);
+  const result = await service.get('fee-1', seller);
 
   assert.equal(result.id, 'fee-1');
   assert.deepEqual(calls[0], { method: 'findUnique', args: { where: { id: 'fee-1' } } });
 
-  const foreignRuleDatabase = {
-    deliveryCompanyFee: {
-      findUnique: async () => ({ ...feeRule, shopId: 'another-shop' }),
-    },
-  } as never;
-  await assert.rejects(getDeliveryCompanyFee('fee-foreign', seller, foreignRuleDatabase), /not authorized/);
+  const foreignRuleRepository = {
+    ...repository,
+    findById: async () => ({ ...feeRule, shopId: 'another-shop' }),
+  };
+  await assert.rejects(
+    new DeliveryCompanyFeeService(foreignRuleRepository).get('fee-foreign', seller),
+    /not authorized/,
+  );
 });
 
 test('updates a shop configuration and changes active status without deleting history', async () => {
-  const { calls, database } = mockDatabase();
-  await updateDeliveryCompanyFee('fee-1', { ...input, chargingBasis: 'PER_ORDER' }, seller, database, validMapping);
-  await setDeliveryCompanyFeeActive('fee-1', false, seller, database);
+  const { calls, repository } = mockDatabase();
+  const service = new DeliveryCompanyFeeService(repository, undefined, validMapping);
+  await service.update('fee-1', { ...input, chargingBasis: 'PER_ORDER' }, seller);
+  await service.setActive('fee-1', false, seller);
 
   assert.deepEqual(calls.map((call) => call.method), ['findUnique', 'update', 'findUnique', 'update']);
   assert.deepEqual((calls[3].args as { data: { active: boolean } }).data, { active: false });
 });
 
 test('rejects moving a fee configuration to another shop', async () => {
-  const { calls, database } = mockDatabase();
+  const { calls, repository } = mockDatabase();
+  const service = new DeliveryCompanyFeeService(repository, undefined, validMapping);
   await assert.rejects(
-    updateDeliveryCompanyFee('fee-1', { ...input, shopId: 'another-shop' }, seller, database, validMapping),
+    service.update('fee-1', { ...input, shopId: 'another-shop' }, seller),
     /Shop cannot be changed/,
   );
   assert.equal(calls.length, 1);
 });
 
 test('rejects an effective end date earlier than its start date', async () => {
-  const { calls, database } = mockDatabase();
+  const { calls, repository } = mockDatabase();
+  const service = new DeliveryCompanyFeeService(repository, undefined, validMapping);
   await assert.rejects(
-    () => createDeliveryCompanyFee({
+    () => service.create({
       ...input,
       effectiveTo: new Date('2026-10-09T23:59:59.000Z'),
-    }, seller, database, validMapping),
+    }, seller),
     /Effective To must be greater than or equal to Effective From/,
   );
   assert.equal(calls.length, 0);
+});
+
+test('validates fee amounts, currency, and effective dates at the request boundary', () => {
+  const parsed = deliveryCompanyFeeSchema.parse({
+    ...input,
+    amount: 300,
+    currency: 'mmk',
+    effectiveFrom: '2026-10-10T00:00:00.000Z',
+    effectiveTo: null,
+  });
+  assert.equal(parsed.amount, '300');
+  assert.equal(parsed.currency, 'MMK');
+  assert.equal(parsed.effectiveFrom.toISOString(), '2026-10-10T00:00:00.000Z');
+
+  assert.equal(deliveryCompanyFeeSchema.safeParse({
+    ...input,
+    amount: '0',
+  }).success, false);
+  assert.equal(deliveryCompanyFeeSchema.safeParse({
+    ...input,
+    amount: '1.001',
+  }).success, false);
+  assert.equal(deliveryCompanyFeeSchema.safeParse({
+    ...input,
+    currency: 'MM',
+  }).success, false);
+  assert.equal(deliveryCompanyFeeSchema.safeParse({
+    ...input,
+    effectiveTo: new Date('2026-10-09T00:00:00.000Z').toISOString(),
+  }).success, false);
+});
+
+test('maps unauthenticated, inactive company, and missing fee errors to typed statuses', async () => {
+  const { feeRule, repository } = mockDatabase();
+  const service = new DeliveryCompanyFeeService(repository, undefined, async () => {
+    throw new DeliveryCompanyFeeApplicationError('Active Delivery Company not found', 404);
+  });
+
+  await assert.rejects(
+    service.create(input, { ...seller, authorizedShopIds: [] }),
+    (error: unknown) => error instanceof DeliveryCompanyFeeApplicationError && error.statusCode === 403,
+  );
+  await assert.rejects(
+    service.create(input, seller),
+    (error: unknown) => error instanceof DeliveryCompanyFeeApplicationError && error.statusCode === 404,
+  );
+  await assert.rejects(
+    new DeliveryCompanyFeeService({
+      ...repository,
+      findById: async () => null,
+    }).get('missing', seller),
+    (error: unknown) => error instanceof DeliveryCompanyFeeApplicationError && error.statusCode === 404,
+  );
+  assert.equal(feeRule.id, 'fee-1');
 });

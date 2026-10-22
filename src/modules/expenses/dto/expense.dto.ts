@@ -1,8 +1,15 @@
 import { z } from 'zod';
+import { EXPENSE_CONFIG } from '../../../config/expense.config.js';
+import { isValidExpenseAmount, isValidExpenseDate } from '../helpers/expense-input.validator.js';
 
 export type ExpenseAuthContext = {
 	userId: string;
 	role?: string;
+	platformRoles?: Array<{
+		code?: string | null;
+		scope?: string | null;
+		permissions?: readonly string[];
+	}>;
 	activeShopId?: string | null;
 	authorizedShopIds?: Iterable<string>;
 	shops?: Array<{ shop_id?: string | null; role?: { code?: string | null; name?: string | null } | null }>;
@@ -30,10 +37,10 @@ export type ExpenseCategoryInput = {
 };
 
 const expenseBaseSchema = z.object({
-	scope: z.enum(['SHOP', 'PLATFORM']).default('SHOP'),
+	scope: z.enum(['SHOP', 'PLATFORM']).default(EXPENSE_CONFIG.defaults.scope),
 	shopId: z.string().trim().min(1).nullable().optional(),
-	amount: z.coerce.number().finite().positive(),
-	expenseDate: z.string().trim().min(1).optional(),
+	amount: z.coerce.number().refine(isValidExpenseAmount, 'Expense amount must be greater than 0'),
+	expenseDate: z.string().trim().min(1).refine(isValidExpenseDate, 'Invalid expense date').optional(),
 	expenseAccountCode: z.string().trim().min(1).optional(),
 	fundingAccountCode: z.string().trim().min(1).optional(),
 	eventId: z.string().trim().min(1).optional(),
@@ -56,7 +63,7 @@ export const expenseCategorySchema = z.object({
 	code: z.string().trim().min(1),
 	name: z.string().trim().min(1),
 	description: z.string().trim().nullable().optional(),
-	status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
+	status: z.enum(EXPENSE_CONFIG.categoryStatuses).optional(),
 });
 
 export const returnedExpenseSchema = expenseBaseSchema.pick({

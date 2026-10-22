@@ -3,9 +3,7 @@ import { connect } from 'amqplib';
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { config } from '../../config/index.js';
-import {
-  isActiveShopDeliveryCompanyConfiguration,
-} from '../../modules/delivery-company-fees/delivery-company-fee.service.js';
+import { deliveryCompanyFeeService } from '../../modules/delivery-company-fees/delivery-company-fee.module.js';
 
 const ROUTING_KEY = 'accounting.delivery-company.configuration.validate';
 const QUEUE_NAME = 'accounting.delivery_company_configuration.rpc';
@@ -37,7 +35,7 @@ async function validateConfiguration(
   shopId: string,
   deliveryCompanyId: string,
 ): Promise<boolean> {
-  return isActiveShopDeliveryCompanyConfiguration(shopId, deliveryCompanyId);
+  return deliveryCompanyFeeService.isActiveConfiguration(shopId, deliveryCompanyId);
 }
 
 export async function handleDeliveryCompanyConfigurationRequest(

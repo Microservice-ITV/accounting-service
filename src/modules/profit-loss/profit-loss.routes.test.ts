@@ -6,10 +6,9 @@ import type { Request, RequestHandler } from 'express';
 
 import {
   buildProfitLossResponse,
-  resolveRequestedShopScope,
-  resolveSellerShopScope,
   ProfitLossService,
 } from './services/profit-loss.service.js';
+import { ProfitLossAuthorizationPolicy } from './policies/profit-loss-authorization.policy.js';
 import type {
   ProfitLossQuery,
   ProfitLossQueryData,
@@ -63,6 +62,7 @@ const emptyData = (): ProfitLossQueryData => ({
 const createService = () => new ProfitLossService({
   getProfitLossData: async () => emptyData(),
 });
+const profitLossAuthorizationPolicy = new ProfitLossAuthorizationPolicy();
 
 test('service resolves and validates requested shop scope before repository access', async () => {
   let repositoryQuery: ScopedProfitLossQuery | undefined;
@@ -212,7 +212,6 @@ test('service filters journal entries to the authenticated shop scope', async ()
     to: query.to,
     groupBy: query.groupBy,
   }, {
-    role: 'shop_admin',
     activeShopId: 'shop-1',
     authorizedShopIds: ['shop-1'],
   });
@@ -476,16 +475,15 @@ test('currency totals are not combined when transactions use different currencie
 });
 
 test('missing shop authorization and a requested unauthorized shop are rejected', () => {
-  assert.throws(() => resolveSellerShopScope(null), /Unauthenticated/);
-  const scope = resolveSellerShopScope({
-    role: 'shop_admin',
+  assert.throws(() => profitLossAuthorizationPolicy.resolveSellerShopScope(null), /Unauthenticated/);
+  const scope = profitLossAuthorizationPolicy.resolveSellerShopScope({
     activeShopId: 'shop-1',
     authorizedShopIds: ['shop-1', 'shop-2'],
   });
   assert.deepEqual(scope.shopIds, ['shop-1', 'shop-2']);
-  assert.deepEqual(resolveRequestedShopScope(scope, 'shop-2').shopIds, ['shop-2']);
+  assert.deepEqual(profitLossAuthorizationPolicy.resolveRequestedShopScope(scope, 'shop-2').shopIds, ['shop-2']);
   assert.throws(
-    () => resolveRequestedShopScope(scope, 'shop-3'),
+    () => profitLossAuthorizationPolicy.resolveRequestedShopScope(scope, 'shop-3'),
     /Forbidden/,
   );
 });
@@ -535,14 +533,20 @@ test('report endpoint rejects unauthenticated access and an unauthorized shop re
   }
 });
 
-test('platform role receives unfiltered scope while seller scope remains explicit', () => {
-  assert.deepEqual(resolveSellerShopScope({
-    role: 'super_admin',
+test('platform scope and finance.read receive unfiltered scope while seller scope remains explicit', () => {
+  assert.deepEqual(profitLossAuthorizationPolicy.resolveSellerShopScope({
+    platformRoles: [{ code: 'any-role-code', scope: 'platform', permissions: ['finance.read'] }],
     authorizedShopIds: ['shop-1'],
   }), { shopIds: null });
-  assert.deepEqual(resolveSellerShopScope({
-    role: 'shop_admin',
+  assert.deepEqual(profitLossAuthorizationPolicy.resolveSellerShopScope({
+    platformRoles: [{ code: 'role-without-report-permission', scope: 'platform', permissions: [] }],
     activeShopId: null,
     authorizedShopIds: ['shop-1', 'shop-2', 'shop-2'],
   }), { shopIds: ['shop-1', 'shop-2'] });
+  assert.throws(
+    () => profitLossAuthorizationPolicy.resolveSellerShopScope({
+      platformRoles: [{ code: 'role-without-report-permission', scope: 'platform', permissions: [] }],
+    }),
+    /authorized shop/,
+  );
 });

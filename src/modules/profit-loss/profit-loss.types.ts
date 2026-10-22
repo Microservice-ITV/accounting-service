@@ -1,5 +1,7 @@
+import type { ExpenseAuthContext } from '../expenses/dto/expense.dto.js';
+
 export type AuthenticatedReportContext = {
-  role?: string | null;
+  platformRoles?: ExpenseAuthContext['platformRoles'];
   activeShopId?: string | null;
   authorizedShopIds?: Iterable<string> | null;
 };

@@ -1,4 +1,4 @@
-import { createJournalEntryInTransaction } from '../../entries/entry.service.js';
+import { createJournalEntryInTransaction } from '../../entries/services/entry.service.js';
 import { resolveManagerChainFromAuth, resolvePlatformManagerChainFromAuth } from '../auth-hierarchy.client.js';
 import type { IExpenseApprovalRepository } from '../interfaces/expense-approval.repository.interface.js';
 import type { IExpenseApprovalService } from '../interfaces/expense-approval.service.interface.js';

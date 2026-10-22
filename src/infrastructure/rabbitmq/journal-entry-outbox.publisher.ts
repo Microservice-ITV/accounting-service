@@ -1,7 +1,7 @@
 import { Channel, ChannelModel, ConfirmChannel, connect } from 'amqplib';
 import prisma from '../../lib/prisma.js';
 import { config } from '../../config/index.js';
-import { buildJournalEntryUpsertEvent } from '../../modules/entries/entry.service.js';
+import { buildJournalEntryUpsertEvent } from '../../modules/entries/helpers/journal-entry-event.builder.js';
 
 const EVENT_BATCH_SIZE = 100;
 const PUBLISH_INTERVAL_MS = 1_000;

@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import prisma from '../../lib/prisma.js';
-import { createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
+import { createJournalEntryInTransaction } from '../../modules/entries/services/entry.service.js';
 import { ExpenseRepository } from '../../modules/expenses/repositories/expense.repository.js';
 import { config } from '../../config/index.js';
 import { recordCodDeliveryCollectionJournal } from '../../modules/entries/cod-lifecycle.service.js';

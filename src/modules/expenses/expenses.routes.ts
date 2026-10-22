@@ -1,11 +1,14 @@
 import { Router } from 'express';
 import { requireExpenseAuth } from '../../middleware/auth.js';
 import { ExpenseController } from './controllers/expense.controller.js';
+import { ExpenseAuthorizationPolicy } from './policies/expense-authorization.policy.js';
 import { ExpenseRepository } from './repositories/expense.repository.js';
 import { ExpenseService } from './services/expense.service.js';
 
 const router = Router();
-const expenseController = new ExpenseController(new ExpenseService(new ExpenseRepository()));
+const expenseController = new ExpenseController(
+  new ExpenseService(new ExpenseRepository(), new ExpenseAuthorizationPolicy()),
+);
 
 router.get('/expenses/categories', expenseController.listCategories.bind(expenseController));
 router.post('/expenses/categories', expenseController.createCategory.bind(expenseController));

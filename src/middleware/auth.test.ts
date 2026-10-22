@@ -4,6 +4,7 @@ import type { Request, Response } from 'express';
 import {
   requireDeliveryCompanyConfigurationAccess,
   requireExpenseAuth,
+  resolveAuthenticatedExpenseContext,
 } from './auth.js';
 
 const originalFetch = globalThis.fetch;
@@ -121,7 +122,11 @@ test('allows authorized platform finance and Super Admin roles to read any shop 
       access_context: {
         active_shop: null,
         shops: [],
-        platform_roles: [{ code: role }],
+        platform_roles: [{
+          code: role,
+          scope: 'platform',
+          permissions: ['finance.read'],
+        }],
       },
     });
 
@@ -133,6 +138,73 @@ test('allows authorized platform finance and Super Admin roles to read any shop 
     assert.equal(result.nextCalled, true);
     assert.equal(result.statusCode, 200);
   }
+});
+
+test('platform configuration access requires platform scope and finance.read, not a role name', async () => {
+  mockAuthContext({
+    user: { id: 'runtime-role-user', role: 'legacy-role' },
+    access_context: {
+      active_shop: null,
+      shops: [],
+      platform_roles: [{
+        code: 'runtime-defined-role',
+        scope: 'platform',
+        permissions: ['finance.read'],
+      }],
+    },
+  });
+  const allowed = await invokeShopConfigurationAccess({
+    shopId: 'shop-2',
+    authorization: 'Bearer valid-token',
+  });
+  assert.equal(allowed.nextCalled, true);
+
+  mockAuthContext({
+    user: { id: 'role-name-only-user', role: 'super_admin' },
+    access_context: {
+      active_shop: null,
+      shops: [],
+      platform_roles: [{
+        code: 'super_admin',
+        scope: 'platform',
+        permissions: [],
+      }],
+    },
+  });
+  const denied = await invokeShopConfigurationAccess({
+    shopId: 'shop-2',
+    authorization: 'Bearer valid-token',
+  });
+  assert.equal(denied.nextCalled, false);
+  assert.equal(denied.statusCode, 403);
+});
+
+test('normalizes platform scope and permissions from the Auth Service access context', async () => {
+  mockAuthContext({
+    user: { id: 'platform-user', role: 'legacy-role' },
+    access_context: {
+      active_shop: null,
+      shops: [],
+      platform_roles: [{
+        code: 'runtime-defined-role',
+        name: 'Runtime Defined Role',
+        scope: 'platform',
+        permissions: ['finance.read'],
+      }],
+    },
+  });
+
+  const context = await resolveAuthenticatedExpenseContext({
+    headers: { authorization: 'Bearer test-token' },
+  } as Request);
+
+  assert.equal(context.role, 'runtime-defined-role');
+  assert.deepEqual(context.platformRoles, [{
+    code: 'runtime-defined-role',
+    name: 'Runtime Defined Role',
+    scope: 'platform',
+    permissions: ['finance.read'],
+  }]);
 });
 
 test('allows Order Service internal access only with its configured service key', async () => {

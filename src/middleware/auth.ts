@@ -1,23 +1,52 @@
 import type { NextFunction, Request, Response } from 'express';
 import { timingSafeEqual } from 'node:crypto';
+import { ExpenseAuthorizationPolicy } from '../modules/expenses/policies/expense-authorization.policy.js';
+
+type AuthenticatedPlatformRole = {
+  code: string;
+  name?: string;
+  scope: string;
+  permissions: string[];
+};
 
 export type AuthenticatedExpenseContext = {
   userId: string;
   email?: string;
   role?: string;
+  platformRoles?: AuthenticatedPlatformRole[];
   activeShopId?: string | null;
   authorizedShopIds: string[];
   shops: Array<{ shop_id?: string | null; shop_name?: string | null; shop_domain?: string | null; membership_status?: string | null; role?: { code?: string | null; name?: string | null } | null }>;
 };
 
-const platformExpenseRoles = new Set([
-  'platform_super_admin',
-  'super_admin',
-  'platform_finance',
-  'platform_director',
-  'platform_cfo',
-  'cfo',
-]);
+const expenseAuthorizationPolicy = new ExpenseAuthorizationPolicy();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function normalizePlatformRoles(value: unknown): AuthenticatedPlatformRole[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((candidate): AuthenticatedPlatformRole[] => {
+    if (!isRecord(candidate)
+      || typeof candidate.code !== 'string'
+      || typeof candidate.scope !== 'string'
+      || !Array.isArray(candidate.permissions)
+      || !candidate.permissions.every((permission) => typeof permission === 'string')) {
+      return [];
+    }
+
+    return [{
+      code: candidate.code,
+      name: typeof candidate.name === 'string' ? candidate.name : undefined,
+      scope: candidate.scope,
+      permissions: candidate.permissions,
+    }];
+  });
+}
 
 function getBearerToken(headerValue: string | string[] | undefined): string | undefined {
   if (Array.isArray(headerValue)) {
@@ -51,7 +80,7 @@ function normalizeAuthContext(raw: any): AuthenticatedExpenseContext | null {
   }
 
   const shops = Array.isArray(accessContext?.shops) ? accessContext.shops : [];
-  const platformRoles = Array.isArray(accessContext?.platform_roles) ? accessContext.platform_roles : [];
+  const platformRoles = normalizePlatformRoles(accessContext?.platform_roles);
   const activeShop = accessContext?.active_shop ?? null;
   const platformRole = platformRoles.find((role: { code?: unknown }) => typeof role?.code === 'string')?.code;
   const userRole = typeof user?.role === 'string'
@@ -73,6 +102,7 @@ function normalizeAuthContext(raw: any): AuthenticatedExpenseContext | null {
     userId,
     email: typeof user?.email === 'string' ? user.email : undefined,
     role: platformRole ?? userRole,
+    platformRoles,
     activeShopId,
     authorizedShopIds: Array.from(new Set(authorizedShopIds)),
     shops,
@@ -106,7 +136,7 @@ export async function resolveAuthenticatedExpenseContext(req: Request): Promise<
     throw new Error('Unauthenticated');
   }
 
-  const isPlatformUser = platformExpenseRoles.has(context.role?.trim().toLowerCase() ?? '');
+  const isPlatformUser = expenseAuthorizationPolicy.canAccessPlatformExpenses(context);
 
   if (!context.activeShopId && context.authorizedShopIds.length === 0 && !isPlatformUser) {
     throw new Error('Seller is not assigned to any authorized shop');
@@ -158,7 +188,7 @@ export function requireDeliveryCompanyConfigurationAccess(
     try {
       const context = await resolveAuthenticatedExpenseContext(req);
       const shopId = Array.isArray(req.params.shopId) ? req.params.shopId[0] : req.params.shopId;
-      const isPlatformUser = platformExpenseRoles.has(context.role?.trim().toLowerCase() ?? '');
+      const isPlatformUser = expenseAuthorizationPolicy.canAccessPlatformExpenses(context);
       const canAccessShop = context.activeShopId === shopId
         || context.authorizedShopIds.includes(shopId);
 
