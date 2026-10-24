@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma.js';
-import { createJournalEntryInTransaction } from './entry.service.js';
+import { createJournalEntryInTransaction } from './services/entry.service.js';
 
 type CodJournalContext = {
   orderId: string;

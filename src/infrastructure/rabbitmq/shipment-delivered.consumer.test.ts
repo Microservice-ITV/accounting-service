@@ -12,7 +12,7 @@ import {
   selectApplicableDeliveryFee,
 } from './shipment-delivered.consumer.js';
 import type { ShipmentDeliveredEvent } from './shipment-delivered.consumer.js';
-import { createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
+import { createJournalEntryInTransaction } from '../../modules/entries/services/entry.service.js';
 
 const DELIVERY_COMPANY_ID = 'company-royal';
 const SHOP_ID = 'shop-1';

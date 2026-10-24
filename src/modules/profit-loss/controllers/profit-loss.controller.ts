@@ -3,10 +3,7 @@ import { z } from 'zod';
 import type { AuthenticatedExpenseContext } from '../../../middleware/auth.js';
 import type { IProfitLossService } from '../interfaces/profit-loss.service.interface.js';
 import { profitLossQuerySchema } from '../dto/profit-loss.dto.js';
-
-const statusForError = (message: string) =>
-  /unauthenticated|unauthorized|token/i.test(message) ? 401
-    : message.startsWith('Forbidden:') || message.includes('authorized shop') ? 403 : 500;
+import { ProfitLossApplicationError } from '../errors/profit-loss.error.js';
 
 type ProfitLossRequest = Request & { auth?: AuthenticatedExpenseContext };
 
@@ -26,11 +23,10 @@ export class ProfitLossController {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.issues[0]?.message ?? 'Invalid Profit & Loss query' });
       }
-      const message = error instanceof Error ? error.message : 'Unable to generate report';
-      const status = statusForError(message);
-      return res.status(status).json({
-        error: status === 500 ? 'Unable to generate report' : message,
-      });
+      if (error instanceof ProfitLossApplicationError) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      return res.status(500).json({ error: 'Unable to generate report' });
     }
   }
 }
