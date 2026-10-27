@@ -18,6 +18,11 @@ export const config = {
     process.env.RABBITMQ_SHIPMENT_DELIVERED_QUEUE || 'accounting.shipment_delivered',
   rabbitmqShipmentDeliveredDlq:
     process.env.RABBITMQ_SHIPMENT_DELIVERED_DLQ || 'accounting.shipment_delivered.dlq',
+  rabbitmqOrderReturnedKey: process.env.RABBITMQ_ORDER_RETURNED_KEY || 'order.returned',
+  rabbitmqOrderReturnedQueue:
+    process.env.RABBITMQ_ORDER_RETURNED_QUEUE || 'accounting.order_returned',
+  rabbitmqOrderReturnedDlq:
+    process.env.RABBITMQ_ORDER_RETURNED_DLQ || 'accounting.order_returned.dlq',
   accountingEventsExchange: process.env.ACCOUNTING_EVENTS_EXCHANGE || 'accounting.events',
   accountingJournalEntryRoutingKey:
     process.env.ACCOUNTING_JOURNAL_ENTRY_ROUTING_KEY || 'accounting.journal-entry.upserted',
