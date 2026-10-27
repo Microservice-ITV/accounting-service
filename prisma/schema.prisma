@@ -28,6 +28,53 @@ enum ApprovalActionType {
   CANCELLED
 }
 
+enum PayrollLineType {
+  EARNING
+  DEDUCTION
+}
+
+enum PayrollLineCategory {
+  BASE_SALARY
+  OVERTIME
+  ALLOWANCE
+  COMMISSION
+  BONUS
+  OTHER_EARNING
+  UNPAID_LEAVE
+  ABSENCE
+  LATENESS
+  TAX
+  OTHER_DEDUCTION
+}
+
+enum PayrollRunStatus {
+  DRAFT
+  CALCULATED
+  UNDER_REVIEW
+  APPROVED
+  PAID
+  VOID
+}
+
+enum PayslipStatus {
+  GENERATED
+  ISSUED
+  REVOKED
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CASH
+  MOBILE_PAY
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  RECONCILED
+}
+
 enum ExpenseScope {
   SHOP
   PLATFORM
@@ -358,4 +405,171 @@ model EntryLine {
   createdAt      DateTime  @default(now())
 
   journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+}
+
+model PayrollPolicy {
+  id                       String        @id @default(cuid())
+  shopId                   String?
+  name                     String
+  currency                 String        @default("USD")
+  standardWorkingDays      Int           @default(22)
+  standardDailyHours       Decimal       @default(8.00) @db.Decimal(5, 2)
+  overtimeRateMultiplier   Decimal       @default(1.50) @db.Decimal(5, 2)
+  taxRate                  Decimal       @default(0.00) @db.Decimal(5, 4)
+  latenessDeductionPerMin  Decimal       @default(0.00) @db.Decimal(5, 4)
+  absenceDeductionPerDay   Decimal       @default(0.00) @db.Decimal(5, 2)
+  unpaidLeaveDeductionPerDay Decimal     @default(0.00) @db.Decimal(5, 2)
+  isActive                 Boolean       @default(true)
+  effectiveFrom            DateTime?
+  effectiveTo              DateTime?
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
+
+  payrollRuns PayrollRun[]
+
+  @@index([shopId, isActive])
+}
+
+model PayrollRun {
+  id                 String            @id @default(cuid())
+  reference          String            @unique
+  periodStart        DateTime          @db.Date
+  periodEnd          DateTime          @db.Date
+  payDate            DateTime?         @db.Date
+  status             PayrollRunStatus  @default(DRAFT)
+  shopId             String?
+  payrollPolicyId    String?
+  currency           String            @default("USD")
+  totalGross         Decimal           @default(0) @db.Decimal(12, 2)
+  totalDeductions    Decimal           @default(0) @db.Decimal(12, 2)
+  totalNet           Decimal           @default(0) @db.Decimal(12, 2)
+  employeeCount      Int               @default(0)
+  preparedBy         String?
+  approvedBy         String?
+  calculatedAt       DateTime?
+  reviewedAt         DateTime?
+  approvedAt         DateTime?
+  paidAt             DateTime?
+  lockedAt           DateTime?
+  notes              String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  payrollPolicy      PayrollPolicy?    @relation(fields: [payrollPolicyId], references: [id], onDelete: SetNull)
+  items              PayrollItem[]
+  payslips           Payslip[]
+  paymentRecords     PaymentRecord[]
+  auditLogs          PayrollAuditLog[]
+
+  @@index([shopId, status])
+  @@index([periodStart, periodEnd])
+  @@index([status])
+}
+
+model PayrollItem {
+  id                String        @id @default(cuid())
+  payrollRunId      String
+  employeeId        String
+  baseSalary        Decimal       @default(0) @db.Decimal(12, 2)
+  grossPay          Decimal       @default(0) @db.Decimal(12, 2)
+  totalDeductions   Decimal       @default(0) @db.Decimal(12, 2)
+  netPay            Decimal       @default(0) @db.Decimal(12, 2)
+  currency          String        @default("USD")
+  workedDays        Decimal       @default(0) @db.Decimal(5, 2)
+  absentDays        Decimal       @default(0) @db.Decimal(5, 2)
+  unpaidLeaveDays   Decimal       @default(0) @db.Decimal(5, 2)
+  overtimeMinutes   Int           @default(0)
+  snapshot          Json?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  payrollRun        PayrollRun    @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  lines             PayrollItemLine[]
+  payslip           Payslip?
+  paymentRecords    PaymentRecord[]
+
+  @@unique([payrollRunId, employeeId])
+  @@index([employeeId])
+}
+
+model PayrollItemLine {
+  id               String            @id @default(cuid())
+  payrollItemId    String
+  lineType         PayrollLineType
+  category         PayrollLineCategory
+  description      String
+  quantity         Decimal?          @db.Decimal(5, 2)
+  rate             Decimal?          @db.Decimal(10, 4)
+  amount           Decimal           @db.Decimal(12, 2)
+  sourceType       String?
+  sourceId         String?
+  meta             Json?
+  createdAt        DateTime          @default(now())
+
+  payrollItem      PayrollItem       @relation(fields: [payrollItemId], references: [id], onDelete: Cascade)
+
+  @@index([payrollItemId, category])
+}
+
+model Payslip {
+  id                String          @id @default(cuid())
+  payslipNumber     String          @unique
+  payrollRunId      String
+  payrollItemId     String          @unique
+  employeeId        String
+  status            PayslipStatus   @default(GENERATED)
+  generatedAt       DateTime        @default(now())
+  issuedAt          DateTime?
+  revokedAt         DateTime?
+  fileUrl           String?
+  snapshot          Json?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  payrollRun        PayrollRun      @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  payrollItem       PayrollItem     @relation(fields: [payrollItemId], references: [id], onDelete: Cascade)
+
+  @@index([payrollRunId, status])
+  @@index([employeeId, status])
+}
+
+model PaymentRecord {
+  id              String           @id @default(cuid())
+  payrollRunId    String
+  payrollItemId   String?
+  employeeId      String
+  method          PaymentMethod
+  status          PaymentStatus    @default(PENDING)
+  amount          Decimal          @db.Decimal(12, 2)
+  currency        String           @default("USD")
+  reference       String?
+  bankName        String?
+  accountLast4    String?
+  paidAt          DateTime?
+  processedBy     String?
+  notes           String?
+  meta            Json?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  payrollRun      PayrollRun       @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  payrollItem     PayrollItem?     @relation(fields: [payrollItemId], references: [id], onDelete: SetNull)
+
+  @@index([payrollRunId, status])
+  @@index([employeeId, status])
+}
+
+model PayrollAuditLog {
+  id             String              @id @default(cuid())
+  payrollRunId   String
+  action         String
+  actorId        String?
+  actorName      String?
+  description    String?
+  meta           Json?
+  createdAt      DateTime            @default(now())
+
+  payrollRun     PayrollRun          @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+
+  @@index([payrollRunId, createdAt])
 }

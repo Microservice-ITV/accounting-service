@@ -7,6 +7,9 @@ import expenseApprovalRoutes from './modules/expenses/expense-approval.routes.js
 import approvalPolicyRoutes from './modules/expenses/approval-policy.routes.js';
 import profitLossRoutes from './modules/profit-loss/profit-loss.routes.js';
 import deliveryCompanyFeeRoutes from './modules/delivery-company-fees/delivery-company-fees.routes.js';
+import payrollPolicyRoutes from './modules/payroll-policies/payroll-policies.routes.js';
+import payrollRunRoutes from './modules/payroll-runs/payroll-runs.routes.js';
+import payrollRecordRoutes from './modules/payroll-records/payroll-records.routes.js';
 
 const app = express();
 const MAX_JSON_BODY = '10mb';
@@ -43,5 +46,13 @@ app.use('/api/v1', expenseApprovalRoutes);
 app.use('/api/v1', approvalPolicyRoutes);
 app.use('/api/v1', profitLossRoutes);
 app.use('/api/v1', deliveryCompanyFeeRoutes);
+app.use('/api/v1', payrollPolicyRoutes);
+app.use('/api/v1', payrollRunRoutes);
+app.use('/api/v1', payrollRecordRoutes);
+
+// The React client calls the accounting service without the /api/v1 prefix.
+app.use('/', payrollPolicyRoutes);
+app.use('/', payrollRunRoutes);
+app.use('/', payrollRecordRoutes);
 
 export default app;
