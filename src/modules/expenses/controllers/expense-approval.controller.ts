@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { requireExpenseAuth, type AuthenticatedExpenseContext } from '../../../middleware/auth.js';
 import { submitExpenseSchema } from '../dto/expense-approval.dto.js';
 import type { IExpenseApprovalService } from '../interfaces/expense-approval.service.interface.js';
+import { ExpenseAuthorizationPolicy } from '../policies/expense-authorization.policy.js';
 
 type ApprovalRequest = Request & { auth?: AuthenticatedExpenseContext };
 
@@ -27,7 +28,10 @@ function getAuthenticatedUserId(req: ApprovalRequest): string {
 }
 
 export class ExpenseApprovalController {
-  constructor(private readonly approvalService: IExpenseApprovalService) {}
+  constructor(
+    private readonly approvalService: IExpenseApprovalService,
+    private readonly expenseAuthorizationPolicy = new ExpenseAuthorizationPolicy(),
+  ) {}
 
   async submit(req: ApprovalRequest, res: Response) {
     try {
@@ -48,8 +52,7 @@ export class ExpenseApprovalController {
       const status = await this.approvalService.getExpenseApprovalStatus(
         getParam(req.params.expenseId),
         req.auth?.authorizedShopIds ?? [],
-        ['platform_super_admin', 'super_admin', 'platform_finance', 'finance_manager', 'platform_director', 'cfo']
-          .includes(req.auth?.role?.trim().toLowerCase() ?? ''),
+        this.expenseAuthorizationPolicy.canAccessPlatformExpenses(req.auth),
       );
       return res.json(status);
     } catch (error) {

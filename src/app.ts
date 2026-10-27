@@ -10,6 +10,7 @@ import deliveryCompanyFeeRoutes from './modules/delivery-company-fees/delivery-c
 import payrollPolicyRoutes from './modules/payroll-policies/payroll-policies.routes.js';
 import payrollRunRoutes from './modules/payroll-runs/payroll-runs.routes.js';
 import payrollRecordRoutes from './modules/payroll-records/payroll-records.routes.js';
+import orderReturnStageRoutes from './modules/returns/order-return-stage.routes.js';
 
 const app = express();
 const MAX_JSON_BODY = '10mb';
@@ -54,5 +55,7 @@ app.use('/api/v1', payrollRecordRoutes);
 app.use('/', payrollPolicyRoutes);
 app.use('/', payrollRunRoutes);
 app.use('/', payrollRecordRoutes);
+app.use('/api/v1', orderReturnStageRoutes);
+app.use('/api/v1/entries', orderReturnStageRoutes);
 
 export default app;

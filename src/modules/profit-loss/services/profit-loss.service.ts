@@ -5,58 +5,16 @@ import type {
   ProfitLossQuery,
   ProfitLossQueryData,
   ProfitLossResponse,
-  ReportScope,
   ScopedProfitLossQuery,
 } from '../profit-loss.types.js';
 import type { IProfitLossRepository } from '../interfaces/profit-loss.repository.interface.js';
 import type { IProfitLossService } from '../interfaces/profit-loss.service.interface.js';
+import { PROFIT_LOSS_CONFIG } from '../../../config/profit-loss.config.js';
+import { ProfitLossAuthorizationPolicy } from '../policies/profit-loss-authorization.policy.js';
 
-const PLATFORM_ROLES = new Set([
-  'platform_super_admin',
-  'super_admin',
-  'platform_finance',
-  'platform_director',
-  'platform_cfo',
-  'cfo',
-]);
-
-const MISSING_COMPONENTS = ['refunds', 'tax', 'cogs', 'paymentFees', 'commission', 'shipping'];
-
-const normalizeShopId = (value?: string | null) => String(value ?? '').trim();
 const numberOf = (value: number | string | { toString(): string }) => Number(value.toString());
 const roundMoney = (value: number) => Number(value.toFixed(2));
 const toDate = (value: Date | string) => value instanceof Date ? value : new Date(value);
-
-export function resolveSellerShopScope(context?: AuthenticatedReportContext | null): ReportScope {
-  if (!context) {
-    throw new Error('Unauthenticated');
-  }
-
-  const role = normalizeShopId(context.role).toLowerCase();
-  if (PLATFORM_ROLES.has(role)) return { shopIds: null };
-
-  const shopIds = new Set(
-    Array.from(context.authorizedShopIds ?? [])
-      .map((shopId) => normalizeShopId(shopId))
-      .filter(Boolean),
-  );
-  const activeShopId = normalizeShopId(context.activeShopId);
-  if (activeShopId) shopIds.add(activeShopId);
-
-  if (shopIds.size === 0) {
-    throw new Error('Seller must be assigned to an authorized shop');
-  }
-  return { shopIds: [...shopIds] };
-}
-
-export function resolveRequestedShopScope(scope: ReportScope, requestedShopId?: string | null): ReportScope {
-  const shopId = normalizeShopId(requestedShopId);
-  if (!shopId) return scope;
-  if (scope.shopIds && !scope.shopIds.includes(shopId)) {
-    throw new Error('Forbidden: shop is not assigned to this user');
-  }
-  return { shopIds: [shopId] };
-}
 
 const periodFor = (value: Date | string, groupBy: 'day' | 'month') => {
   const date = toDate(value);
@@ -82,7 +40,7 @@ const createPoint = (period: string): BreakdownPoint => ({
 export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: ProfitLossQueryData): ProfitLossResponse {
   const buckets = new Map<string, CurrencyBucket>();
   const ensureBucket = (currencyValue: string, period?: string) => {
-    const currency = currencyValue.trim() || 'UNKNOWN';
+    const currency = currencyValue.trim() || PROFIT_LOSS_CONFIG.currencyFallback;
     let bucket = buckets.get(currency);
     if (!bucket) {
       bucket = {
@@ -254,7 +212,7 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
       ?? null;
     if (!shopIsInScope(shopId)) continue;
     const period = periodFor(line.journalEntry.entryDate, query.groupBy);
-    const { bucket, point } = ensureBucket(line.currency ?? 'UNKNOWN', period);
+    const { bucket, point } = ensureBucket(line.currency ?? PROFIT_LOSS_CONFIG.currencyFallback, period);
     const amount = numberOf(line.amount);
     bucket.actualRevenue += amount;
     point!.actualRevenue += amount;
@@ -276,7 +234,7 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
     const discounts = bucket.hasIncompleteDiscountAllocations ? null : roundMoney(bucket.sellerItemDiscounts);
     const netSales = discounts === null ? null : roundMoney(bucket.grossSales - bucket.sellerItemDiscounts);
     const missingComponents = [
-      ...MISSING_COMPONENTS,
+      ...PROFIT_LOSS_CONFIG.missingComponents,
       ...(bucket.hasIncompleteDiscountAllocations ? ['discountAllocations'] : []),
     ];
 
@@ -342,7 +300,7 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
           label: 'Current partial profit/loss; not complete ecommerce profit',
         },
       },
-      commissionStatus: 'temporarily disabled: platform commission rate is 0%',
+      commissionStatus: PROFIT_LOSS_CONFIG.commissionStatus,
       breakdown,
     };
   });
@@ -365,23 +323,26 @@ export function buildProfitLossResponse(query: ScopedProfitLossQuery, data: Prof
     paymentFees: null,
     commission: null,
     missingComponents: [...new Set([
-      ...MISSING_COMPONENTS,
+      ...PROFIT_LOSS_CONFIG.missingComponents,
       ...reports.flatMap((report) => report.missingComponents.includes('discountAllocations') ? ['discountAllocations'] : []),
     ])],
-    commissionStatus: 'temporarily disabled: platform commission rate is 0%',
+    commissionStatus: PROFIT_LOSS_CONFIG.commissionStatus,
     reports,
   };
 }
 
 export class ProfitLossService implements IProfitLossService {
-  constructor(private readonly profitLossRepository: IProfitLossRepository) {}
+  constructor(
+    private readonly profitLossRepository: IProfitLossRepository,
+    private readonly authorizationPolicy = new ProfitLossAuthorizationPolicy(),
+  ) {}
 
   async getProfitLoss(
     query: ProfitLossQuery,
     context: AuthenticatedReportContext,
   ): Promise<ProfitLossResponse> {
-    const scope = resolveRequestedShopScope(
-      resolveSellerShopScope(context),
+    const scope = this.authorizationPolicy.resolveRequestedShopScope(
+      this.authorizationPolicy.resolveSellerShopScope(context),
       query.requestedShopId,
     );
     const scopedQuery: ScopedProfitLossQuery = { ...query, scope };

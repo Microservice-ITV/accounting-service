@@ -2,9 +2,13 @@ import { Router } from 'express';
 import { requireExpenseAuth } from '../../middleware/auth.js';
 import { ExpenseApprovalController } from './controllers/expense-approval.controller.js';
 import { expenseApprovalService } from './expense-approval.service.js';
+import { ExpenseAuthorizationPolicy } from './policies/expense-authorization.policy.js';
 
 const router = Router();
-const expenseApprovalController = new ExpenseApprovalController(expenseApprovalService);
+const expenseApprovalController = new ExpenseApprovalController(
+  expenseApprovalService,
+  new ExpenseAuthorizationPolicy(),
+);
 
 router.post('/expenses/:expenseId/submit', requireExpenseAuth, expenseApprovalController.submit.bind(expenseApprovalController));
 router.get('/expenses/:expenseId/approval-status', requireExpenseAuth, expenseApprovalController.approvalStatus.bind(expenseApprovalController));

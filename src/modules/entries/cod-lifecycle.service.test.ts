@@ -11,7 +11,7 @@ import {
   recordCodDeliveryCollectionJournal,
   recordCodOrderRevenue,
 } from './cod-lifecycle.service.js';
-import { createJournalEntryInTransaction } from './entry.service.js';
+import { createJournalEntryInTransaction } from './services/entry.service.js';
 
 const ORDER_ID = 'order-1';
 const SHOP_ID = 'shop-1';

@@ -2,7 +2,7 @@ import { Channel, ChannelModel, ConsumeMessage, connect } from 'amqplib';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import prisma from '../../lib/prisma.js';
-import { createJournalEntryInTransaction } from '../../modules/entries/entry.service.js';
+import { createJournalEntryInTransaction } from '../../modules/entries/services/entry.service.js';
 import { config } from '../../config/index.js';
 import {
   PermanentShipmentDeliveredEventError,

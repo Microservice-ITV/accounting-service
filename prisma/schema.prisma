@@ -572,4 +572,16 @@ model PayrollAuditLog {
   payrollRun     PayrollRun          @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
 
   @@index([payrollRunId, createdAt])
+model OrderReturnStage {
+  id         String   @id
+  eventId    String   @unique
+  orderId    String   @unique
+  shopIds    String[] @default([])
+  reason     String
+  returnedAt DateTime @db.Timestamp(3)
+  status     String   @default("RETURNED")
+  createdAt  DateTime @default(now()) @db.Timestamp(3)
+  updatedAt  DateTime @updatedAt @db.Timestamp(3)
+
+  @@index([returnedAt])
 }
