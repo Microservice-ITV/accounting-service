@@ -63,6 +63,7 @@ HEALTH_RETRIES=30
 HEALTH_INTERVAL=2
 DB_RETRIES=30
 DB_INTERVAL=2
+PULL_TIMEOUT_SECONDS="${PULL_TIMEOUT_SECONDS:-300}"
 GATEWAY_RETRIES=10
 GATEWAY_INTERVAL=2
 
@@ -162,6 +163,16 @@ validate_environment() {
 
     if ! command -v flock >/dev/null 2>&1; then
         error "flock is required."
+        return 1
+    fi
+
+    if ! command -v timeout >/dev/null 2>&1; then
+        error "GNU timeout (coreutils) is required to bound image pulls."
+        return 1
+    fi
+
+    if [[ ! "$PULL_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        error "PULL_TIMEOUT_SECONDS must be a positive integer."
         return 1
     fi
 
@@ -845,9 +856,17 @@ docker_authenticate() {
 # ============================================================
 pull_image() {
     log "Pulling Docker image"
+    local started_at=$SECONDS
+    local pull_status=0
+    echo "Started: $(date -u '+%Y-%m-%dT%H:%M:%SZ'); timeout: ${PULL_TIMEOUT_SECONDS}s"
 
-    if ! docker pull "$IMAGE"; then
-        error "Failed to pull image."
+    timeout --foreground --kill-after=10s "${PULL_TIMEOUT_SECONDS}s" docker pull "$IMAGE" || pull_status=$?
+    if [[ "$pull_status" -ne 0 ]]; then
+        error "Image pull failed after $((SECONDS - started_at))s (exit $pull_status)."
+        if [[ "$pull_status" -eq 124 || "$pull_status" -eq 137 ]]; then
+            error "Image pull exceeded the ${PULL_TIMEOUT_SECONDS}s deadline."
+            echo "   Check VPS registry connectivity, free disk space, and Docker daemon logs."
+        fi
         remove_deployment_image_if_unused "$IMAGE"
         return 1
     fi
@@ -857,7 +876,7 @@ pull_image() {
     echo
     echo "Image:"
     echo "  $IMAGE"
-    success "Docker image pulled successfully."
+    success "Docker image pulled successfully in $((SECONDS - started_at))s."
 }
 
 # ============================================================
