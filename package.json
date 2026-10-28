@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
+    "postinstall": "prisma generate --schema=prisma/schema.prisma",
     "dev": "tsx watch src/server.ts",
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "start": "node dist/server.js",
