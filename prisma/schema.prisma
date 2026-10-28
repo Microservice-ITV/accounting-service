@@ -572,6 +572,8 @@ model PayrollAuditLog {
   payrollRun     PayrollRun          @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
 
   @@index([payrollRunId, createdAt])
+}
+
 model OrderReturnStage {
   id         String   @id
   eventId    String   @unique
