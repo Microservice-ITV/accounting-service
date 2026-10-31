@@ -10,6 +10,8 @@ import type {
 export type ApprovalPolicySeed = {
   id: string;
   name: string;
+  scope?: 'SHOP' | 'PLATFORM';
+  shopId?: string | null;
   minAmount: number | { toString(): string };
   maxAmount?: number | { toString(): string } | null;
   level?: number | null;
@@ -26,6 +28,12 @@ export type ApprovalUserContext = {
   position?: string | null;
 };
 export type ManagerChainApprovers = Map<number, string>;
+
+type ApprovalExpenseSeed = {
+  scope: 'SHOP' | 'PLATFORM';
+  shopId: string | null;
+  amount: number | { toString(): string };
+};
 
 type AuthShopUser = {
   id?: string | null;
@@ -103,6 +111,24 @@ export function getMatchingApprovalPolicy(amount: number, policies: ApprovalPoli
     const maxAmount = policy.maxAmount == null ? Number.POSITIVE_INFINITY : Number(policy.maxAmount);
     return amount >= minAmount && amount <= maxAmount;
   });
+}
+
+export function approvalPolicyMatchesExpense(expense: ApprovalExpenseSeed, policy: ApprovalPolicySeed) {
+  if ((policy.scope ?? 'SHOP') !== expense.scope) return false;
+
+  const shopMatches = expense.scope === 'PLATFORM'
+    ? !expense.shopId && !policy.shopId
+    : Boolean(expense.shopId)
+      && policy.shopId === expense.shopId
+      && policy.conditions?.some((condition) =>
+        condition.field === 'shopId'
+        && condition.operator === '='
+        && condition.value === expense.shopId);
+  const amount = Number(expense.amount);
+  const amountMatches = amount >= Number(policy.minAmount ?? 0)
+    && (policy.maxAmount == null || amount <= Number(policy.maxAmount));
+
+  return shopMatches && amountMatches;
 }
 
 export function resolveManagerChain(
@@ -240,17 +266,7 @@ export class ExpenseApprovalService implements IExpenseApprovalService {
     }
 
     const activePolicies = await this.approvalRepository.findActiveApprovalPolicies();
-    const matchingPolicy = activePolicies.find((policy) => {
-      const scopeMatches = policy.scope === expense.scope;
-      const shopMatches = expense.scope === 'PLATFORM'
-        ? !expense.shopId && !policy.shopId
-        : policy.conditions.some((condition) => condition.field === 'shopId' && condition.operator === '=' && condition.value === expense.shopId);
-      const amountMatches =
-        Number(expense.amount) >= Number(policy.minAmount ?? 0)
-        && (policy.maxAmount == null || Number(expense.amount) <= Number(policy.maxAmount));
-
-      return scopeMatches && shopMatches && amountMatches;
-    });
+    const matchingPolicy = activePolicies.find((policy) => approvalPolicyMatchesExpense(expense, policy));
 
     if (!matchingPolicy) {
       throw new Error('No approval policy matches this expense.');

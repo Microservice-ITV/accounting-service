@@ -73,6 +73,7 @@ model Account {
   parent           Account?         @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
   children         Account[]        @relation("AccountHierarchy")
   lines            EntryLine[]
+  inventoryMappings InventoryAccountMapping[]
   statusDefinition AccountingStatus @relation("AccountStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
 
   @@index([statusDomain, status])
@@ -203,7 +204,7 @@ model ExpenseApproval {
   statusDomain   String              @default("APPROVAL")
   action         ApprovalActionType?
   comment        String?
-  approvedAt     DateTime?
+  approvedAt     DateTime?           @db.Timestamptz(3)
   rejectedAt     DateTime?
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
@@ -327,6 +328,7 @@ model JournalEntry {
 
   lines            EntryLine[]
   settlements      PaymentSettlement[]
+  inventoryMovements InventoryValuationMovement[]
   statusDefinition AccountingStatus    @relation("JournalEntryStatus", fields: [statusDomain, status], references: [domain, code], onDelete: Restrict)
 
   @@unique([referenceType, referenceId])
@@ -345,6 +347,40 @@ model AccountingOutboxEvent {
   @@index([publishedAt, createdAt])
 }
 
+model InvoiceProjection {
+  id                 String   @id @default(cuid())
+  invoiceId          String   @unique
+  invoiceNumber      String
+  orderId            String
+  shopId             String
+  customerId         String
+  invoiceDate        DateTime @db.Timestamp(3)
+  paymentMethod      String?
+  observedStatus     String
+  currency           String
+  invoiceTotal       Decimal  @db.Decimal(12, 2)
+  statusEventId      String
+  statusEventType    String
+  statusObservedAt   DateTime @db.Timestamp(3)
+  createdAt          DateTime @default(now()) @db.Timestamp(3)
+  updatedAt          DateTime @updatedAt @db.Timestamp(3)
+
+  @@index([shopId, invoiceDate])
+  @@index([shopId, observedStatus, invoiceDate])
+  @@index([currency, invoiceDate])
+}
+
+model InvoiceEventInbox {
+  id          String   @id @default(cuid())
+  eventId     String   @unique
+  invoiceId   String
+  eventType   String
+  payloadHash String
+  processedAt DateTime @default(now()) @db.Timestamp(3)
+
+  @@index([invoiceId, processedAt])
+}
+
 model EntryLine {
   id             String    @id @default(cuid())
   journalEntryId String
@@ -358,6 +394,121 @@ model EntryLine {
   createdAt      DateTime  @default(now())
 
   journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+}
+
+/// Finance-configured mapping from an accounting purpose to an existing Account row.
+/// The application validates account type and active status at configuration and posting time.
+model InventoryAccountMapping {
+  id                 String      @id @default(cuid())
+  mappingKey         String      @unique
+  accountId          String
+  approvedByUserId   String
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([accountId])
+}
+
+/// Durable inbox and posting result for warehouse valuation events. BLOCKED rows are replayable.
+model InventoryValuationMovement {
+  id                   String       @id @default(cuid())
+  eventId              String       @unique
+  movementId           String
+  movementType         String
+  sourceDocumentId     String
+  sourceDocumentType   String
+  shopId               String
+  warehouseId          String
+  productId            String
+  sku                  String?
+  variantId            String
+  quantity             Decimal      @db.Decimal(18, 4)
+  unitCostMmk          Decimal?     @db.Decimal(18, 2)
+  totalCostMmk         Decimal?     @db.Decimal(18, 2)
+  currency             String
+  onHandQty            Decimal      @db.Decimal(18, 4)
+  averageUnitCostMmk   Decimal?     @db.Decimal(18, 2)
+  inventoryValueMmk    Decimal?     @db.Decimal(18, 2)
+  valuationVersion     Int
+  occurredAt           DateTime     @db.Timestamp(3)
+  eventTimestamp       DateTime     @db.Timestamp(3)
+  originalCurrency     String?
+  originalAmount       Decimal?     @db.Decimal(18, 2)
+  appliedExchangeRate  Decimal?     @db.Decimal(18, 8)
+  rateDate             String?
+  rateSource           String?
+  status               String       @default("BLOCKED")
+  blockReasons         String[]     @default([])
+  rawPayload           Json
+  journalEntryId       String?
+  createdAt            DateTime     @default(now()) @db.Timestamp(3)
+  updatedAt            DateTime     @updatedAt @db.Timestamp(3)
+
+  journalEntry JournalEntry? @relation(fields: [journalEntryId], references: [id], onDelete: SetNull)
+
+  @@index([shopId, occurredAt])
+  @@index([warehouseId, occurredAt])
+  @@index([sku, occurredAt])
+  @@index([movementType, status, occurredAt])
+  @@index([movementId])
+}
+
+/// Warehouse source events retained for traceable history when the event lacks
+/// the complete quantity/cost/currency data required for a financial valuation.
+model WarehouseInventorySourceEvent {
+  id                 String   @id @default(cuid())
+  eventId            String
+  lineIndex          Int
+  eventType          String
+  correlationId      String
+  eventTimestamp     DateTime @db.Timestamp(3)
+  occurredAt         DateTime @db.Timestamp(3)
+  sourceDocumentId   String?
+  sourceDocumentType String?
+  movementType       String?
+  productId          String?
+  sku                String?
+  variantId          String?
+  shopId             String?
+  warehouseId        String?
+  quantity           Decimal? @db.Decimal(18, 4)
+  availableQty       Decimal? @db.Decimal(18, 4)
+  onHandQty          Decimal? @db.Decimal(18, 4)
+  reportedUnitCost   Decimal? @db.Decimal(18, 4)
+  currency           String?
+  blockReason        String
+  rawPayload         Json
+  createdAt          DateTime @default(now()) @db.Timestamp(3)
+
+  @@unique([eventId, lineIndex])
+  @@index([shopId, occurredAt])
+  @@index([warehouseId, occurredAt])
+  @@index([productId, occurredAt])
+  @@index([correlationId, productId])
+}
+
+/// Most recent validated warehouse valuation by product, variant, shop, and warehouse.
+model InventoryValuationSnapshot {
+  id                  String   @id @default(cuid())
+  shopId              String
+  warehouseId         String
+  productId           String
+  sku                 String?
+  variantId           String
+  onHandQty           Decimal  @db.Decimal(18, 4)
+  averageUnitCostMmk  Decimal? @db.Decimal(18, 2)
+  inventoryValueMmk   Decimal? @db.Decimal(18, 2)
+  valuationVersion    Int
+  lastEventId         String   @unique
+  asOf                DateTime @db.Timestamp(3)
+  createdAt           DateTime @default(now()) @db.Timestamp(3)
+  updatedAt           DateTime @updatedAt @db.Timestamp(3)
+
+  @@unique([shopId, warehouseId, productId, variantId])
+  @@index([shopId, warehouseId, sku])
+  @@index([asOf])
 }
 
 model OrderReturnStage {

@@ -8,6 +8,9 @@ import approvalPolicyRoutes from './modules/expenses/approval-policy.routes.js';
 import profitLossRoutes from './modules/profit-loss/profit-loss.routes.js';
 import deliveryCompanyFeeRoutes from './modules/delivery-company-fees/delivery-company-fees.routes.js';
 import orderReturnStageRoutes from './modules/returns/order-return-stage.routes.js';
+import arApRoutes from './modules/ar-ap/ar-ap.routes.js';
+import invoiceProjectionRoutes from './modules/ar-ap/invoice-projection.routes.js';
+import inventoryAccountingRoutes from './modules/inventory-accounting/inventory-accounting.routes.js';
 
 const app = express();
 const MAX_JSON_BODY = '10mb';
@@ -46,5 +49,8 @@ app.use('/api/v1', profitLossRoutes);
 app.use('/api/v1', deliveryCompanyFeeRoutes);
 app.use('/api/v1', orderReturnStageRoutes);
 app.use('/api/v1/entries', orderReturnStageRoutes);
+app.use('/api/v1', arApRoutes);
+app.use('/api/v1', invoiceProjectionRoutes);
+app.use('/api/v1', inventoryAccountingRoutes);
 
 export default app;

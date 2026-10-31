@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import prisma from '../../lib/prisma.js';
 import {
   advanceApprovalWorkflow,
+  approvalPolicyMatchesExpense,
   approveExpenseStep,
   buildSequentialManagerApprovals,
   getMatchingApprovalPolicy,
@@ -42,6 +43,40 @@ test('Expense approval matrix has non-overlapping amount boundaries', () => {
   assert.equal(getMatchingApprovalPolicy(5000000, policies)?.id, 'p3');
   assert.equal(getMatchingApprovalPolicy(5000001, policies)?.id, 'p4');
   assert.equal(getMatchingApprovalPolicy(Number.MAX_SAFE_INTEGER, policies)?.id, 'p4');
+});
+
+test('shop expense approval policy must match both shopId and its exact shop condition', () => {
+  const expense = { scope: 'SHOP' as const, shopId: 'shop-b', amount: 500 };
+  const shopAPolicy: ApprovalPolicySeed = {
+    id: 'policy-a',
+    name: 'Shop A policy',
+    scope: 'SHOP',
+    shopId: 'shop-a',
+    minAmount: 0,
+    maxAmount: 1000,
+    conditions: [{ field: 'shopId', operator: '=', value: 'shop-a' }],
+  };
+  const shopBPolicy: ApprovalPolicySeed = {
+    ...shopAPolicy,
+    id: 'policy-b',
+    name: 'Shop B policy',
+    shopId: 'shop-b',
+    conditions: [{ field: 'shopId', operator: '=', value: 'shop-b' }],
+  };
+
+  assert.equal(approvalPolicyMatchesExpense(expense, shopAPolicy), false);
+  assert.equal(approvalPolicyMatchesExpense(expense, shopBPolicy), true);
+});
+
+test('platform approval policies retain platform-wide matching behavior', () => {
+  assert.equal(approvalPolicyMatchesExpense(
+    { scope: 'PLATFORM', shopId: null, amount: 500 },
+    { id: 'platform', name: 'Platform policy', scope: 'PLATFORM', shopId: null, minAmount: 0, maxAmount: 1000 },
+  ), true);
+  assert.equal(approvalPolicyMatchesExpense(
+    { scope: 'SHOP', shopId: 'shop-b', amount: 500 },
+    { id: 'platform', name: 'Platform policy', scope: 'PLATFORM', shopId: null, minAmount: 0, maxAmount: 1000 },
+  ), false);
 });
 
 test('Manager hierarchy resolves direct and delegated managers by level', () => {
@@ -112,7 +147,7 @@ test('policy level is capped by the available manager chain instead of inventing
   ]);
 });
 
-test('single available manager can complete a two-level policy and create one final journal entry', async () => {
+test('Shop B expense uses the Shop B policy rather than Shop A policy and creates a journal entry after approval', async () => {
   const office = await prisma.expenseCategory.findUnique({ where: { code: 'OFFICE' } });
   assert.ok(office, 'the OFFICE expense category is required');
 
@@ -121,9 +156,23 @@ test('single available manager can complete a two-level policy and create one fi
   const createdPolicyIds: string[] = [];
 
   try {
+    const shopAPolicy = await prisma.approvalPolicy.create({
+      data: {
+        name: 'Shop A policy must not match Shop B expense',
+        shopId: 'shop-a',
+        minAmount: 20000,
+        maxAmount: 50000,
+        level: 1,
+        isActive: true,
+        conditions: { create: [{ field: 'shopId', operator: '=', value: 'shop-a' }] },
+      },
+    });
+    createdPolicyIds.push(shopAPolicy.id);
+
     const policy = await prisma.approvalPolicy.create({
       data: {
         name: 'Level 2 policy with one manager',
+        shopId: 'single-manager-shop',
         minAmount: 20000,
         maxAmount: 50000,
         level: 2,
@@ -167,6 +216,7 @@ test('single available manager can complete a two-level policy and create one fi
     }) as typeof fetch;
 
     const submission = await submitExpenseForApproval(expense.id, 'seller-user', 'token');
+    assert.equal(submission.policyId, policy.id);
     assert.deepEqual(submission.approvals.map((approval) => approval.approverUserId), ['john']);
     assert.deepEqual(submission.approvals.map((approval) => approval.status), ['PENDING']);
 
@@ -199,6 +249,7 @@ test('wrong approver cannot approve another manager step', async () => {
     const policy = await prisma.approvalPolicy.create({
       data: {
         name: 'Level 2 policy wrong approver',
+        shopId: 'wrong-approver-shop',
         minAmount: 20000,
         maxAmount: 50000,
         level: 2,
@@ -270,6 +321,7 @@ test('reject and return actions preserve the existing approval behavior', async 
     const policy = await prisma.approvalPolicy.create({
       data: {
         name: 'Return and reject policy',
+        shopId: 'reject-return-shop',
         minAmount: 0,
         maxAmount: 50000,
         level: 1,
@@ -402,6 +454,7 @@ test('level 1, 2, and 3 policies snapshot the correct sequential manager chain',
     const levelOnePolicy = await prisma.approvalPolicy.create({
       data: {
         name: 'Level 1 policy',
+        shopId: 'level-shop',
         minAmount: 0,
         maxAmount: 10000,
         level: 1,
@@ -429,6 +482,7 @@ test('level 1, 2, and 3 policies snapshot the correct sequential manager chain',
     const levelTwoPolicy = await prisma.approvalPolicy.create({
       data: {
         name: 'Level 2 policy',
+        shopId: 'level-shop',
         minAmount: 20000,
         maxAmount: 50000,
         level: 2,
@@ -460,6 +514,7 @@ test('level 1, 2, and 3 policies snapshot the correct sequential manager chain',
     const levelThreePolicy = await prisma.approvalPolicy.create({
       data: {
         name: 'Level 3 policy',
+        shopId: 'level-shop',
         minAmount: 60000,
         maxAmount: 100000,
         level: 3,
@@ -498,6 +553,7 @@ test('submission fails atomically when no active manager is available', async ()
     const policy = await prisma.approvalPolicy.create({
       data: {
         name: 'Level 3 policy without manager chain',
+        shopId: 'missing-hierarchy-shop',
         minAmount: 0,
         maxAmount: 200000,
         level: 3,

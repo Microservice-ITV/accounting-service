@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import prisma from '../../../lib/prisma.js';
+import type { ExpenseListStatus } from '../dto/expense.dto.js';
 import type { ExpenseDbClient, IExpenseRepository } from '../interfaces/expense.repository.interface.js';
 
 export class ExpenseRepository implements IExpenseRepository {
@@ -66,14 +67,40 @@ export class ExpenseRepository implements IExpenseRepository {
     });
   }
 
-  listExpenses(shopIds: string[], client: ExpenseDbClient = prisma) {
-    return client.expense.findMany({ where: { shopId: { in: shopIds } }, orderBy: { createdAt: 'desc' } });
+  listExpenses(shopIds: string[], statuses?: ExpenseListStatus[], client: ExpenseDbClient = prisma) {
+    return client.expense.findMany({
+      where: {
+        shopId: { in: shopIds },
+        ...(statuses ? { status: { in: statuses } } : {}),
+      },
+      include: {
+        expenseType: true,
+        approvals: {
+          where: { approvedAt: { not: null } },
+          orderBy: { approvedAt: 'desc' },
+          take: 1,
+          select: { approvedAt: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
-  listPlatformExpenses(client: ExpenseDbClient = prisma) {
+  listPlatformExpenses(statuses?: ExpenseListStatus[], client: ExpenseDbClient = prisma) {
     return client.expense.findMany({
-      where: { scope: 'PLATFORM' },
-      include: { expenseType: true },
+      where: {
+        scope: 'PLATFORM',
+        ...(statuses ? { status: { in: statuses } } : {}),
+      },
+      include: {
+        expenseType: true,
+        approvals: {
+          where: { approvedAt: { not: null } },
+          orderBy: { approvedAt: 'desc' },
+          take: 1,
+          select: { approvedAt: true },
+        },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }

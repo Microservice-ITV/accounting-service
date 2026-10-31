@@ -17,6 +17,14 @@ import {
   closeJournalEntryOutboxPublisher,
   startJournalEntryOutboxPublisher,
 } from './infrastructure/rabbitmq/journal-entry-outbox.publisher.js';
+import {
+  closeInventoryValuationConsumer,
+  startInventoryValuationConsumer,
+} from './infrastructure/rabbitmq/inventory-valuation.consumer.js';
+import {
+  closeInvoiceProjectionConsumer,
+  startInvoiceProjectionConsumer,
+} from './infrastructure/rabbitmq/invoice-projection.consumer.js';
 
 const server = app.listen(config.port, () => {
   console.log(`${config.appName} running on port ${config.port}`);
@@ -33,6 +41,12 @@ startOrderReturnedConsumer().catch((error) => {
 });
 startDeliveryCompanyConfigurationRpcConsumer().catch((error) => {
   console.error('Failed to start Delivery Company configuration RPC consumer', error);
+});
+startInventoryValuationConsumer().catch((error) => {
+  console.error('Failed to start inventory valuation accounting consumer', error);
+});
+startInvoiceProjectionConsumer().catch((error) => {
+  console.error('Failed to start invoice projection accounting consumer', error);
 });
 startJournalEntryOutboxPublisher();
 
@@ -54,6 +68,8 @@ const shutdown = async () => {
     closeShipmentDeliveredConsumer(),
     closeOrderReturnedConsumer(),
     closeDeliveryCompanyConfigurationRpcConsumer(),
+    closeInventoryValuationConsumer(),
+    closeInvoiceProjectionConsumer(),
     closeJournalEntryOutboxPublisher(),
     new Promise<void>((resolve) => server.close(() => resolve())),
   ]);

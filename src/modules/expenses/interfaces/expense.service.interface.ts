@@ -1,4 +1,4 @@
-import type { ExpenseAuthContext, CreateExpenseInput, ExpenseCategoryInput } from '../dto/expense.dto.js';
+import type { ExpenseAuthContext, CreateExpenseInput, ExpenseCategoryInput, ExpenseListStatus } from '../dto/expense.dto.js';
 
 export interface IExpenseService {
   listExpenseCategories(): Promise<unknown[]>;
@@ -7,6 +7,6 @@ export interface IExpenseService {
   deleteExpenseCategory(id: string): Promise<unknown>;
   createExpense(input: CreateExpenseInput, authContext?: ExpenseAuthContext | null): Promise<unknown>;
   updateReturnedExpense(expenseId: string, input: Pick<CreateExpenseInput, 'amount' | 'expenseDate' | 'expenseCategoryId' | 'description' | 'receiptImage'>, authContext?: ExpenseAuthContext | null): Promise<unknown>;
-  listExpenses(authContext?: ExpenseAuthContext | null): Promise<unknown[]>;
+  listExpenses(authContext?: ExpenseAuthContext | null, statuses?: ExpenseListStatus[]): Promise<unknown[]>;
   getExpenseByReference(referenceId: string, authContext?: ExpenseAuthContext | null): Promise<unknown>;
 }

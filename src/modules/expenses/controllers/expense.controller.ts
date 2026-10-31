@@ -3,7 +3,12 @@ import { z } from 'zod';
 import type { AuthenticatedExpenseContext } from '../../../middleware/auth.js';
 import { ExpenseApplicationError } from '../errors/expense.error.js';
 import type { IExpenseService } from '../interfaces/expense.service.interface.js';
-import { expenseCategorySchema, expenseSchema, returnedExpenseSchema } from '../dto/expense.dto.js';
+import {
+  expenseCategorySchema,
+  expenseListStatusFilterSchema,
+  expenseSchema,
+  returnedExpenseSchema,
+} from '../dto/expense.dto.js';
 
 type ExpenseRequest = Request & { auth?: AuthenticatedExpenseContext };
 
@@ -60,7 +65,8 @@ export class ExpenseController {
 
   async list(req: ExpenseRequest, res: Response) {
     try {
-      return res.json(await this.expenseService.listExpenses(getAuth(req)));
+      const statuses = expenseListStatusFilterSchema.parse(req.query.status);
+      return res.json(await this.expenseService.listExpenses(getAuth(req), statuses));
     } catch (error) {
       return this.respondWithError(res, error, 'Failed to fetch expenses');
     }

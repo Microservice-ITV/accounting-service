@@ -1,0 +1,3 @@
+ALTER TABLE "ExpenseApproval"
+ALTER COLUMN "approvedAt" TYPE TIMESTAMPTZ(3)
+USING "approvedAt" AT TIME ZONE 'UTC';

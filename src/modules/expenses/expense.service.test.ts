@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { Prisma } from '@prisma/client';
 
 import { EXPENSE_CONFIG } from '../../config/expense.config.js';
-import { expenseSchema } from './dto/expense.dto.js';
+import { expenseListStatusFilterSchema, expenseSchema } from './dto/expense.dto.js';
 import { ExpenseApplicationError } from './errors/expense.error.js';
 import { buildExpenseReferenceId, expenseReferencePrefixForDate } from './helpers/expense-reference.generator.js';
 import { validateReceiptImage } from './helpers/receipt-validator.js';
 import { ExpenseAuthorizationPolicy } from './policies/expense-authorization.policy.js';
 import { ExpenseRepository } from './repositories/expense.repository.js';
 import { ExpenseService } from './services/expense.service.js';
+import type { ExpenseDbClient } from './interfaces/expense.repository.interface.js';
 
 test('expense reference generator uses the configured prefix and sequence length', () => {
   const date = new Date(2025, 0, 2);
@@ -135,4 +136,85 @@ test('expense DTO validates amounts and dates consistently', () => {
   assert.equal(expenseSchema.safeParse(validExpense).success, true);
   assert.equal(expenseSchema.safeParse({ ...validExpense, amount: 0 }).success, false);
   assert.equal(expenseSchema.safeParse({ ...validExpense, expenseDate: 'not-a-date' }).success, false);
+});
+
+test('expense list status filter accepts the ledger lifecycle statuses and rejects unknown statuses', () => {
+  assert.deepEqual(
+    expenseListStatusFilterSchema.parse('PENDING,PENDING_APPROVAL,APPROVED,REJECTED'),
+    ['PENDING', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED'],
+  );
+  assert.equal(expenseListStatusFilterSchema.safeParse('APPROVED,UNKNOWN').success, false);
+});
+
+test('expense repository applies status filters within the authorized shop or platform scope', async () => {
+  const queries: Array<Record<string, unknown>> = [];
+  const client = {
+    expense: {
+      findMany: async (query: Record<string, unknown>) => {
+        queries.push(query);
+        return [];
+      },
+    },
+  } as unknown as ExpenseDbClient;
+  const repository = new ExpenseRepository();
+  const statuses = ['PENDING', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED'] as const;
+
+  await repository.listExpenses(['shop-1'], [...statuses], client);
+  await repository.listPlatformExpenses([...statuses], client);
+
+  assert.deepEqual(queries, [
+    {
+      where: { shopId: { in: ['shop-1'] }, status: { in: [...statuses] } },
+      include: {
+        expenseType: true,
+        approvals: {
+          where: { approvedAt: { not: null } },
+          orderBy: { approvedAt: 'desc' },
+          take: 1,
+          select: { approvedAt: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    },
+    {
+      where: { scope: 'PLATFORM', status: { in: [...statuses] } },
+      include: {
+        expenseType: true,
+        approvals: {
+          where: { approvedAt: { not: null } },
+          orderBy: { approvedAt: 'desc' },
+          take: 1,
+          select: { approvedAt: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    },
+  ]);
+});
+
+test('expense service serializes the approval timestamp as UTC ISO without changing the expense date', async () => {
+  const expenseDate = new Date('2026-10-30T00:00:00.000Z');
+  const approvedAt = new Date('2026-10-30T15:28:33.000Z');
+  const repository = new Proxy(new ExpenseRepository(), {
+    get(target, property, receiver) {
+      if (property === 'listExpenses') {
+        return async () => [{
+          id: 'expense-1',
+          expenseDate,
+          approvals: [{ approvedAt }],
+        }];
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const service = new ExpenseService(repository);
+
+  const [expense] = await service.listExpenses(
+    { userId: 'owner-1', authorizedShopIds: ['shop-1'] },
+    ['APPROVED'],
+  ) as Array<{ expenseDate: Date; approvedAt: string | null }>;
+
+  assert.equal(expense.expenseDate, expenseDate);
+  assert.equal(expense.approvedAt, '2026-10-30T15:28:33.000Z');
+  assert.equal(new Date(expense.approvedAt ?? '').toISOString(), approvedAt.toISOString());
 });
