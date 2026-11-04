@@ -556,6 +556,7 @@ model InventoryValuationSnapshot {
   @@unique([shopId, warehouseId, productId, variantId])
   @@index([shopId, warehouseId, sku])
   @@index([asOf])
+}
 model PayrollPolicy {
   id                       String        @id @default(cuid())
   shopId                   String?
