@@ -50,18 +50,18 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --omit=dev
+    npm ci --omit=dev \
+    && chown -R app:app node_modules
 
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/prisma ./prisma
-COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=build /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=build --chown=app:app /app/dist ./dist
+COPY --from=build --chown=app:app /app/prisma ./prisma
+COPY --from=build --chown=app:app /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build --chown=app:app /app/node_modules/@prisma ./node_modules/@prisma
 
 COPY docker/node/docker-entrypoint.prod.sh \
     /usr/local/bin/docker-entrypoint.prod.sh
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.prod.sh \
-    && chown -R app:app /var/www/html/accounting-service
+RUN chmod +x /usr/local/bin/docker-entrypoint.prod.sh
 
 USER app
 

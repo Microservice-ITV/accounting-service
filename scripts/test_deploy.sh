@@ -292,6 +292,43 @@ else
 fi
 
 echo
+echo "TEST 7: image pull succeeds within its deadline"
+(
+    timeout() {
+        printf '%s\n' "$*" > "$STATE/pull_command"
+        return 0
+    }
+    pull_image > "$STATE/pull_output" 2>&1
+    [[ "$IMAGE_TAG" == "test" ]]
+)
+assert_eq "successful pull exports image tag" "0" "$?"
+assert_eq "pull has a bounded deadline" \
+    "--foreground --kill-after=10s ${PULL_TIMEOUT_SECONDS}s docker pull $IMAGE" \
+    "$(cat "$STATE/pull_command")"
+
+echo
+echo "TEST 8: timed-out pull fails and reports its deadline"
+(
+    timeout() { return 124; }
+    remove_deployment_image_if_unused() { :; }
+    pull_image > "$STATE/pull_timeout_output" 2>&1
+)
+assert_eq "timed-out pull fails deployment" "1" "$?"
+grep -Fq "exceeded the ${PULL_TIMEOUT_SECONDS}s deadline" "$STATE/pull_timeout_output"
+assert_eq "timeout diagnostic is logged" "0" "$?"
+
+echo
+echo "TEST 9: registry errors fail the pull"
+(
+    timeout() { return 1; }
+    remove_deployment_image_if_unused() { :; }
+    pull_image > "$STATE/pull_failure_output" 2>&1
+)
+assert_eq "registry failure fails deployment" "1" "$?"
+grep -Fq "exit 1" "$STATE/pull_failure_output"
+assert_eq "registry exit code is logged" "0" "$?"
+
+echo
 echo "========================================="
 if [[ "$FAIL" -eq 0 ]]; then
     echo "✅ ALL TESTS PASSED ($PASS assertions)"
