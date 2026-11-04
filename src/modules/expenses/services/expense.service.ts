@@ -7,7 +7,7 @@ import { validateReceiptImage } from '../helpers/receipt-validator.js';
 import { ExpenseAuthorizationPolicy } from '../policies/expense-authorization.policy.js';
 import type { IExpenseRepository } from '../interfaces/expense.repository.interface.js';
 import type { IExpenseService } from '../interfaces/expense.service.interface.js';
-import type { CreateExpenseInput, ExpenseAuthContext, ExpenseCategoryInput } from '../dto/expense.dto.js';
+import type { CreateExpenseInput, ExpenseAuthContext, ExpenseCategoryInput, ExpenseListStatus } from '../dto/expense.dto.js';
 
 function isExpenseReferenceCollision(error: unknown): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
@@ -213,12 +213,19 @@ export class ExpenseService implements IExpenseService {
     }
   }
 
-  async listExpenses(authContext?: ExpenseAuthContext | null) {
+  async listExpenses(authContext?: ExpenseAuthContext | null, statuses?: ExpenseListStatus[]) {
     const authenticatedContext = this.authorizationPolicy.requireAuthenticatedUser(authContext);
-    if (this.authorizationPolicy.canAccessPlatformExpenses(authenticatedContext)) {
-      return this.expenseRepository.listPlatformExpenses();
-    }
-    return this.expenseRepository.listExpenses(this.authorizationPolicy.getAuthorizedShopIds(authenticatedContext));
+    const expenses = this.authorizationPolicy.canAccessPlatformExpenses(authenticatedContext)
+      ? await this.expenseRepository.listPlatformExpenses(statuses)
+      : await this.expenseRepository.listExpenses(
+        this.authorizationPolicy.getAuthorizedShopIds(authenticatedContext),
+        statuses,
+      );
+
+    return expenses.map(({ approvals, ...expense }) => ({
+      ...expense,
+      approvedAt: approvals[0]?.approvedAt?.toISOString() ?? null,
+    }));
   }
 
   async getExpenseByReference(referenceId: string, authContext?: ExpenseAuthContext | null) {

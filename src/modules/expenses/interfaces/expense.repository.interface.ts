@@ -1,9 +1,13 @@
 import type { Prisma } from '@prisma/client';
+import type { ExpenseListStatus } from '../dto/expense.dto.js';
 
 export type ExpenseDbClient = Prisma.TransactionClient | Prisma.DefaultPrismaClient;
 export type ExpenseCategoryRecord = Prisma.ExpenseCategoryGetPayload<{}>;
 export type ExpenseRecord = Prisma.ExpenseGetPayload<{}>;
 export type ExpenseWithCategory = Prisma.ExpenseGetPayload<{ include: { expenseType: true } }>;
+export type ExpenseWithApprovalTime = ExpenseWithCategory & {
+  approvals: Array<{ approvedAt: Date | null }>;
+};
 export type JournalEntryWithLines = Prisma.JournalEntryGetPayload<{ include: { lines: { include: { account: true } } } }>;
 
 export interface IExpenseRepository {
@@ -33,8 +37,8 @@ export interface IExpenseRepository {
   upsertExpense(input: Prisma.ExpenseUncheckedCreateInput, client?: ExpenseDbClient): Promise<ExpenseRecord>;
   findExpenseById(expenseId: string, client?: ExpenseDbClient): Promise<ExpenseRecord | null>;
   updateReturnedExpense(expenseId: string, input: Prisma.ExpenseUncheckedUpdateInput, client?: ExpenseDbClient): Promise<ExpenseWithCategory>;
-  listExpenses(shopIds: string[], client?: ExpenseDbClient): Promise<ExpenseRecord[]>;
-  listPlatformExpenses(client?: ExpenseDbClient): Promise<ExpenseWithCategory[]>;
+  listExpenses(shopIds: string[], statuses?: ExpenseListStatus[], client?: ExpenseDbClient): Promise<ExpenseWithApprovalTime[]>;
+  listPlatformExpenses(statuses?: ExpenseListStatus[], client?: ExpenseDbClient): Promise<ExpenseWithApprovalTime[]>;
   findExpenseByReference(referenceId: string, shopIds: string[], client?: ExpenseDbClient): Promise<ExpenseWithCategory | null>;
   findPlatformExpenseByReference(referenceId: string, client?: ExpenseDbClient): Promise<ExpenseWithCategory | null>;
   findJournalByExpenseReference(referenceId: string, client?: ExpenseDbClient): Promise<JournalEntryWithLines | null>;

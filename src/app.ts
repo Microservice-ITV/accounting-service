@@ -11,6 +11,9 @@ import payrollPolicyRoutes from './modules/payroll-policies/payroll-policies.rou
 import payrollRunRoutes from './modules/payroll-runs/payroll-runs.routes.js';
 import payrollRecordRoutes from './modules/payroll-records/payroll-records.routes.js';
 import orderReturnStageRoutes from './modules/returns/order-return-stage.routes.js';
+import arApRoutes from './modules/ar-ap/ar-ap.routes.js';
+import invoiceProjectionRoutes from './modules/ar-ap/invoice-projection.routes.js';
+import inventoryAccountingRoutes from './modules/inventory-accounting/inventory-accounting.routes.js';
 
 const app = express();
 const MAX_JSON_BODY = '10mb';
@@ -57,5 +60,8 @@ app.use('/', payrollRunRoutes);
 app.use('/', payrollRecordRoutes);
 app.use('/api/v1', orderReturnStageRoutes);
 app.use('/api/v1/entries', orderReturnStageRoutes);
+app.use('/api/v1', arApRoutes);
+app.use('/api/v1', invoiceProjectionRoutes);
+app.use('/api/v1', inventoryAccountingRoutes);
 
 export default app;

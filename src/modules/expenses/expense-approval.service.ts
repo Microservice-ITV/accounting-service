@@ -3,6 +3,7 @@ import type { IExpenseApprovalService } from './interfaces/expense-approval.serv
 import { ExpenseApprovalRepository } from './repositories/expense-approval.repository.js';
 import {
   ExpenseApprovalService,
+  approvalPolicyMatchesExpense,
   advanceApprovalWorkflow,
   getMatchingApprovalPolicy,
   loadShopApproverMap,
@@ -19,6 +20,7 @@ export const expenseApprovalService: IExpenseApprovalService = approvalService;
 
 export {
   ExpenseApprovalService,
+  approvalPolicyMatchesExpense,
   advanceApprovalWorkflow,
   buildSequentialManagerApprovals,
   getMatchingApprovalPolicy,

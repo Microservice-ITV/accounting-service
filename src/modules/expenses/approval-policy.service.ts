@@ -136,7 +136,10 @@ async function assertNoActiveOverlap(input: ApprovalPolicyInput, excludePolicyId
       scope: input.scope ?? 'SHOP',
       ...(input.scope === 'PLATFORM'
         ? { shopId: null }
-        : { conditions: { some: { field: SHOP_SCOPE_FIELD, operator: '=', value: input.shopId ?? '' } } }),
+        : {
+          shopId: input.shopId,
+          conditions: { some: { field: SHOP_SCOPE_FIELD, operator: '=', value: input.shopId ?? '' } },
+        }),
       ...(excludePolicyId ? { id: { not: excludePolicyId } } : {}),
     },
     select: { id: true, name: true, minAmount: true, maxAmount: true },
@@ -182,6 +185,8 @@ export async function listApprovalPolicies(shopId: string, authContext: ExpenseA
   const normalizedShopId = assertShopOwner(authContext, shopId);
   return prisma.approvalPolicy.findMany({
     where: {
+      scope: 'SHOP',
+      shopId: normalizedShopId,
       conditions: { some: { field: SHOP_SCOPE_FIELD, operator: '=', value: normalizedShopId } },
     },
     include: policyInclude,
@@ -194,6 +199,8 @@ export async function getApprovalPolicy(id: string, shopId: string, authContext:
   const policy = await prisma.approvalPolicy.findFirst({
     where: {
       id,
+      scope: 'SHOP',
+      shopId: normalizedShopId,
       conditions: { some: { field: SHOP_SCOPE_FIELD, operator: '=', value: normalizedShopId } },
     },
     include: policyInclude,

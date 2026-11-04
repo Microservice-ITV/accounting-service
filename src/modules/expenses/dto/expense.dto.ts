@@ -36,6 +36,25 @@ export type ExpenseCategoryInput = {
 	status?: string;
 };
 
+export const expenseListStatuses = [
+	'DRAFT',
+	'SUBMITTED',
+	'PENDING',
+	'PENDING_APPROVAL',
+	'WAITING',
+	'RETURNED',
+	'APPROVED',
+	'REJECTED',
+	'CANCELLED',
+] as const;
+
+export type ExpenseListStatus = typeof expenseListStatuses[number];
+
+export const expenseListStatusFilterSchema = z.preprocess(
+	(value) => typeof value === 'string' ? value.split(',').map((status) => status.trim()) : value,
+	z.array(z.enum(expenseListStatuses)).optional(),
+);
+
 const expenseBaseSchema = z.object({
 	scope: z.enum(['SHOP', 'PLATFORM']).default(EXPENSE_CONFIG.defaults.scope),
 	shopId: z.string().trim().min(1).nullable().optional(),
