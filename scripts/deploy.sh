@@ -59,7 +59,7 @@ LEGACY_CONTAINER="accounting-service"
 # ============================================================
 HEALTH_PATH="/health"
 HEALTH_PORT="4005"
-HEALTH_RETRIES=30
+HEALTH_RETRIES=90
 HEALTH_INTERVAL=2
 DB_RETRIES=30
 DB_INTERVAL=2
