@@ -243,7 +243,7 @@ test('order.paid accepts ORDER_PAID and does not recognize COD as collected inco
   assert.equal(shouldRecognizeOrderPaidIncome(codOrderEvent), false);
 });
 
-test('order.paid posts COD revenue from authoritative per-shop order totals, not order.created', async () => {
+test('order.paid posts COD receivable at order creation from authoritative per-shop totals', async () => {
   const upserted: Array<{ create: Record<string, unknown> }> = [];
   const recognized: Array<{ orderId: string; shopId: string; eventId: string; entryDate: Date }> = [];
   const tx = {
@@ -259,17 +259,17 @@ test('order.paid posts COD revenue from authoritative per-shop order totals, not
     $transaction: async <T>(work: (transaction: typeof tx) => Promise<T>) => work(tx),
   } as unknown as Parameters<typeof processOrderPaid>[1];
 
-  await processOrderPaid(
-    orderPaidEvent('COD'),
-    database,
-    async (input) => { recognized.push(input); },
-  );
+  const event = orderPaidEvent('COD');
+  const recorder = async (input: typeof recognized[number]) => { recognized.push(input); };
+  await processOrderPaid(event, database, recorder);
+  await processOrderPaid(event, database, recorder);
 
-  assert.equal(upserted.length, 1);
+  assert.equal(upserted.length, 2);
   assert.equal(upserted[0]?.create.paymentStatus, 'COD');
   assert.equal(upserted[0]?.create.paymentId, payments[0]);
   assert.equal(upserted[0]?.create.paidAmount, 100);
   assert.deepEqual(recognized.map((row) => [row.orderId, row.shopId, row.eventId]), [
+    [orders[0], 'shop-a', firstEventId],
     [orders[0], 'shop-a', firstEventId],
   ]);
 });
@@ -357,30 +357,25 @@ test('unsupported events and invalid payment statuses are permanent schema error
 });
 
 function createHarness(options: { committedExpense?: boolean; failFirstSettlement?: boolean } = {}) {
-  const collectionJournals = new Map<string, {
-    eventId: string;
-    lines: Array<{
-      accountCode: string;
-      direction: string;
-      amount: number;
-      currency: string;
-      shopId: string;
-    }>;
-  }>();
   const paymentSettlements = new Map<string, {
     eventId: string;
     amount: number;
     allocations: Array<{ shop_id: string; gross_amount: number }>;
   }>();
-  const journalEventIds = new Map<string, string>();
+  const bankReceipts = new Map<string, {
+    referenceId: string;
+    collectionReference: string;
+    collectedAt: Date;
+    orderId: string;
+    shopId: string;
+    amount: number;
+    currency: string;
+    lines: Array<{ accountCode: string; direction: string; amount: number }>;
+  }>();
   const expenseOrderMembership = new Set(options.committedExpense ? orders : []);
   let expenseCount = options.committedExpense ? 1 : 0;
   let expenseJournalCount = options.committedExpense ? 1 : 0;
   let settlementAttempts = 0;
-
-  if (options.committedExpense) {
-    journalEventIds.set(firstEventId, 'EXPENSE:cod-batch');
-  }
 
   const dependencies: PaymentCollectedProcessorDependencies = {
     getRevenueAllocations: async (orderId) => [{
@@ -395,68 +390,51 @@ function createHarness(options: { committedExpense?: boolean; failFirstSettlemen
       if (expenseCount > 0) return;
       expenseCount = 1;
       expenseJournalCount = 1;
-      journalEventIds.set(eventId, 'EXPENSE:cod-batch');
       input.orderIds.forEach((orderId) => expenseOrderMembership.add(orderId));
     },
-    recordBankReceiptJournals: async (allocations, eventId) => {
-      for (const allocation of allocations) {
-        const referenceId = `${allocation.paymentId}:${allocation.shopId}`;
-        const collectionEventId = `payment.collected:cod-bank-receipt:${allocation.paymentId}:${allocation.shopId}`;
-        const existingOwner = journalEventIds.get(collectionEventId);
-        assert.ok(
-          existingOwner === undefined || existingOwner === `COD_BANK_RECEIPT:${referenceId}`,
-          `Journal event ID ${collectionEventId} collides with ${existingOwner}`,
-        );
-        journalEventIds.set(collectionEventId, `COD_BANK_RECEIPT:${referenceId}`);
-        if (!collectionJournals.has(referenceId)) {
-          collectionJournals.set(referenceId, {
-            eventId,
-            lines: [{
-              accountCode: '1010',
-              direction: 'DEBIT',
-              amount: allocation.amount,
-              currency: allocation.currency,
-              shopId: allocation.shopId,
-            }, {
-              accountCode: '1210',
-              direction: 'CREDIT',
-              amount: allocation.amount,
-              currency: allocation.currency,
-              shopId: allocation.shopId,
-            }],
-          });
-        }
-      }
-    },
-    saveSettlement: async (input) => {
+    saveSettlement: async (input, allocations) => {
       settlementAttempts += 1;
       if (options.failFirstSettlement && settlementAttempts === 1) {
         throw new Error('simulated transient settlement failure');
       }
       const allocationsByShop = new Map<string, number>();
-      let totalAmount = 0;
-      for (const [reference, journal] of collectionJournals) {
-        if (!reference.startsWith(`${input.paymentId}:`)) continue;
-        const debit = journal.lines.find((line) => line.accountCode === '1010');
-        if (!debit) continue;
-        totalAmount += debit.amount;
+      for (const allocation of allocations) {
         allocationsByShop.set(
-          debit.shopId,
-          (allocationsByShop.get(debit.shopId) ?? 0) + debit.amount,
+          allocation.shop_id!,
+          (allocationsByShop.get(allocation.shop_id!) ?? 0) + allocation.gross_amount,
         );
       }
       paymentSettlements.set(input.paymentId, {
         eventId: input.eventId,
-        amount: totalAmount,
+        amount: input.amount,
         allocations: [...allocationsByShop].map(([shop_id, gross_amount]) => ({ shop_id, gross_amount })),
       });
+    },
+    recordBankReceiptJournals: async (allocations, collectionReference) => {
+      for (const allocation of allocations) {
+        const key = `${allocation.paymentId}:${allocation.orderId}:${allocation.shopId}`;
+        if (bankReceipts.has(key)) continue;
+        bankReceipts.set(key, {
+          referenceId: `${allocation.paymentId}:${allocation.shopId}`,
+          collectionReference,
+          collectedAt: allocation.collectedAt,
+          orderId: allocation.orderId,
+          shopId: allocation.shopId,
+          amount: allocation.amount,
+          currency: allocation.currency,
+          lines: [
+            { accountCode: '1010', direction: 'DEBIT', amount: allocation.amount },
+            { accountCode: '1210', direction: 'CREDIT', amount: allocation.amount },
+          ],
+        });
+      }
     },
   };
 
   return {
     dependencies,
-    collectionJournals,
     paymentSettlements,
+    bankReceipts,
     expenseOrderMembership,
     get expenseCount() { return expenseCount; },
     get expenseJournalCount() { return expenseJournalCount; },
@@ -464,34 +442,34 @@ function createHarness(options: { committedExpense?: boolean; failFirstSettlemen
   };
 }
 
-test('accounts all five COD bank receipts without creating receipt revenue journals', async () => {
+test('creates one Stage 3 journal for each order allocation in a completed COD collection batch', async () => {
   const harness = createHarness({ committedExpense: true });
 
   for (let index = 0; index < orders.length; index += 1) {
     await processPaymentCollected(collectedEvent(index), harness.dependencies);
   }
 
-  assert.equal(harness.collectionJournals.size, 5);
   assert.equal(harness.paymentSettlements.size, 5);
+  assert.equal(harness.bankReceipts.size, 5);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
   assert.deepEqual([...harness.expenseOrderMembership].sort(), [...orders].sort());
-  assert.deepEqual(
-    [...harness.collectionJournals.keys()].map((reference) => reference.split(':')[0]).sort(),
-    [...payments].sort(),
-  );
-  assert.equal(
-    harness.collectionJournals.get(`${payments[0]}:shop-a`)?.eventId,
-    firstEventId,
-  );
-  assert.deepEqual(
-    harness.collectionJournals.get(`${payments[0]}:shop-a`)?.lines.map((line) =>
-      [line.accountCode, line.direction]),
-    [['1010', 'DEBIT'], ['1210', 'CREDIT']],
-  );
   for (const paymentId of payments) {
     assert.equal(harness.paymentSettlements.get(paymentId)?.amount, 100);
     assert.equal(harness.paymentSettlements.get(paymentId)?.allocations.length, 1);
+  }
+  for (let index = 0; index < orders.length; index += 1) {
+    const receipt = harness.bankReceipts.get(`${payments[index]}:${orders[index]}:shop-a`);
+    assert.equal(receipt?.referenceId, `${payments[index]}:shop-a`);
+    assert.equal(receipt?.orderId, orders[index]);
+    assert.equal(receipt?.amount, 100);
+    assert.equal(receipt?.currency, 'MMK');
+    assert.equal(receipt?.collectionReference, index === 0 ? firstEventId : `event-${index + 1}`);
+    assert.equal(receipt?.collectedAt.toISOString(), '2026-10-09T03:24:34.000Z');
+    assert.deepEqual(
+      receipt?.lines.map((line) => [line.accountCode, line.direction, line.amount]),
+      [['1010', 'DEBIT', 100], ['1210', 'CREDIT', 100]],
+    );
   }
 });
 
@@ -500,19 +478,19 @@ test('a fully processed duplicate COD event creates no additional records or all
   const event = collectedEvent(0);
 
   await processPaymentCollected(event, harness.dependencies);
-  const journal = harness.collectionJournals.get(`${payments[0]}:shop-a`);
   const settlement = harness.paymentSettlements.get(payments[0]);
+  const receipt = harness.bankReceipts.get(`${payments[0]}:${orders[0]}:shop-a`);
   await processPaymentCollected(event, harness.dependencies);
 
-  assert.equal(harness.collectionJournals.size, 1);
   assert.equal(harness.paymentSettlements.size, 1);
+  assert.equal(harness.bankReceipts.size, 1);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
-  assert.equal(harness.collectionJournals.get(`${payments[0]}:shop-a`), journal);
   assert.deepEqual(harness.paymentSettlements.get(payments[0]), settlement);
+  assert.equal(harness.bankReceipts.get(`${payments[0]}:${orders[0]}:shop-a`), receipt);
 });
 
-test('republishing payment.collected with a new event ID does not create another bank journal', async () => {
+test('republishing payment.collected with a new event ID does not duplicate its Stage 3 journal', async () => {
   const harness = createHarness();
   await processPaymentCollected(collectedEvent(0), harness.dependencies);
   await processPaymentCollected({
@@ -520,19 +498,20 @@ test('republishing payment.collected with a new event ID does not create another
     event_id: 'republished-payment-collected',
   }, harness.dependencies);
 
-  assert.equal(harness.collectionJournals.size, 1);
   assert.equal(harness.paymentSettlements.size, 1);
+  assert.equal(harness.bankReceipts.size, 1);
+  assert.equal(harness.paymentSettlements.get(payments[0])?.eventId, 'republished-payment-collected');
 });
 
-test('a duplicate COD bank receipt creates its batch expense, bank journal, and settlement only once', async () => {
+test('a duplicate COD collected event creates its batch expense, settlement, and Stage 3 journal once', async () => {
   const harness = createHarness();
   const event = collectedEvent(0);
 
   await processPaymentCollected(event, harness.dependencies);
   await processPaymentCollected(event, harness.dependencies);
 
-  assert.equal(harness.collectionJournals.size, 1);
   assert.equal(harness.paymentSettlements.size, 1);
+  assert.equal(harness.bankReceipts.size, 1);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
 });
@@ -547,13 +526,14 @@ test('partial COD collection amounts are rejected and full collection is posted 
     processPaymentCollected(partial, harness.dependencies),
     /does not match the full order shop total/,
   );
-  assert.equal(harness.collectionJournals.size, 0);
+  assert.equal(harness.paymentSettlements.size, 0);
+  assert.equal(harness.bankReceipts.size, 0);
 
   const full = collectedEvent(0);
   await processPaymentCollected(full, harness.dependencies);
   await processPaymentCollected(full, harness.dependencies);
 
-  assert.equal(harness.collectionJournals.size, 1);
+  assert.equal(harness.bankReceipts.size, 1);
   assert.equal(harness.paymentSettlements.get(payments[0])?.amount, 100);
   assert.equal(
     harness.paymentSettlements.get(payments[0])?.allocations[0]?.gross_amount,
@@ -561,16 +541,17 @@ test('partial COD collection amounts are rejected and full collection is posted 
   );
 });
 
-test('payment.collected debits the bank and credits COD clearing, not seller payable', async () => {
+test('payment.collected creates a Stage 3 bank receipt from the successful collection amount', async () => {
   const harness = createHarness();
   await processPaymentCollected(collectedEvent(0), harness.dependencies);
 
-  const journal = harness.collectionJournals.get(`${payments[0]}:shop-a`);
+  assert.equal(harness.paymentSettlements.get(payments[0])?.amount, 100);
+  const receipt = harness.bankReceipts.get(`${payments[0]}:${orders[0]}:shop-a`);
+  assert.equal(receipt?.amount, 100);
   assert.deepEqual(
-    journal?.lines.map((line) => [line.accountCode, line.direction]),
+    receipt?.lines.map((line) => [line.accountCode, line.direction]),
     [['1010', 'DEBIT'], ['1210', 'CREDIT']],
   );
-  assert.equal(journal?.lines.some((line) => line.accountCode === '2100'), false);
 });
 
 test('order-paid income journal event IDs are operation-scoped and preserve existing journal IDs', () => {
@@ -583,7 +564,7 @@ test('order-paid income journal event IDs are operation-scoped and preserve exis
   assert.equal(resolvePaymentJournalEventId(null, orderPaidId), orderPaidId);
 });
 
-test('a retry after bank journal commit completes the missing settlement projection', async () => {
+test('a retry after settlement failure completes the missing collection projection', async () => {
   const harness = createHarness({ committedExpense: true, failFirstSettlement: true });
   const event = collectedEvent(0);
 
@@ -591,33 +572,15 @@ test('a retry after bank journal commit completes the missing settlement project
     processPaymentCollected(event, harness.dependencies),
     /simulated transient settlement failure/,
   );
-  assert.equal(harness.collectionJournals.size, 1);
+  assert.equal(harness.bankReceipts.size, 0);
   assert.equal(harness.paymentSettlements.size, 0);
 
   await processPaymentCollected(event, harness.dependencies);
 
-  assert.equal(harness.collectionJournals.size, 1);
+  assert.equal(harness.bankReceipts.size, 1);
   assert.equal(harness.paymentSettlements.size, 1);
   assert.equal(harness.expenseCount, 1);
   assert.equal(harness.expenseJournalCount, 1);
   assert.equal(harness.settlementAttempts, 2);
   assert.equal(harness.paymentSettlements.get(payments[0])?.allocations.length, 1);
-});
-
-test('a COD bank journal unique-key collision is propagated for retry', async () => {
-  const harness = createHarness({ committedExpense: true });
-  harness.dependencies.recordBankReceiptJournals = async () => {
-    throw Object.assign(new Error('unique constraint violation'), {
-      code: 'P2002',
-      meta: { target: ['eventId'] },
-    });
-  };
-
-  await assert.rejects(processPaymentCollected(collectedEvent(0), harness.dependencies), {
-    code: 'P2002',
-  });
-  assert.equal(harness.collectionJournals.size, 0);
-  assert.equal(harness.paymentSettlements.size, 0);
-  assert.equal(harness.expenseCount, 1);
-  assert.equal(harness.expenseJournalCount, 1);
 });

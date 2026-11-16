@@ -19,6 +19,8 @@ const PAYMENT_ID = 'payment-1';
 const CURRENCY = 'MMK';
 const AMOUNT = 125.5;
 const SHIPPING_TOTAL = 25.5;
+const amountCents = (value: { toString(): string } | number) =>
+  Math.round(Number(value.toString()) * 100);
 
 type MockJournal = {
   status: string;
@@ -31,18 +33,28 @@ type MockJournal = {
   }>;
 };
 
-function createHarness(paymentStatus: string | null = 'COD') {
+function createHarness(
+  paymentStatus: string | null = 'COD',
+  options: {
+    projectionExists?: boolean;
+    amount?: number;
+    paymentId?: string | null;
+    currency?: string | null;
+  } = {},
+) {
   const journals = new Map<string, MockJournal>();
+  const journalInputs: Array<Parameters<typeof createJournalEntryInTransaction>[0]> = [];
   let writes = 0;
   const tx = {
     pnlOrderShop: {
       findUnique: async ({ where }: { where: { orderId_shopId: { orderId: string; shopId: string } } }) => {
         if (where.orderId_shopId.orderId !== ORDER_ID || where.orderId_shopId.shopId !== SHOP_ID) return null;
+        if (options.projectionExists === false) return null;
         return {
-          paymentId: PAYMENT_ID,
+          paymentId: options.paymentId === undefined ? PAYMENT_ID : options.paymentId,
           paymentStatus,
-          currency: CURRENCY,
-          paidAmount: { toString: () => String(AMOUNT) },
+          currency: options.currency === undefined ? CURRENCY : options.currency,
+          paidAmount: { toString: () => String(options.amount ?? AMOUNT) },
           shippingTotal: { toString: () => String(SHIPPING_TOTAL) },
         };
       },
@@ -68,6 +80,7 @@ function createHarness(paymentStatus: string | null = 'COD') {
   } as unknown as Parameters<typeof recordCodOrderRevenue>[1];
   const journalCreator: typeof createJournalEntryInTransaction = async (input) => {
     writes += 1;
+    journalInputs.push(input);
     journals.set(`${input.referenceType}:${input.referenceId}`, {
       status: 'POSTED',
       lines: input.lines.map((line) => ({
@@ -81,7 +94,7 @@ function createHarness(paymentStatus: string | null = 'COD') {
     return undefined as never;
   };
 
-  return { database, journalCreator, journals, get writes() { return writes; } };
+  return { database, journalCreator, journals, journalInputs, get writes() { return writes; } };
 }
 
 const revenueInput = {
@@ -102,13 +115,19 @@ const bankAllocation = {
   paymentId: PAYMENT_ID,
   amount: AMOUNT,
   currency: CURRENCY,
+  collectedAt: new Date('2026-10-17T02:00:00.000Z'),
+  checkoutReference: 'checkout-1',
 };
 
 test('COD order revenue is posted once with the actual shop amount and currency', async () => {
   const harness = createHarness();
 
   await recordCodOrderRevenue(revenueInput, harness.database, harness.journalCreator);
-  await recordCodOrderRevenue(revenueInput, harness.database, harness.journalCreator);
+  await recordCodOrderRevenue(
+    { ...revenueInput, eventId: 'republished-order-paid-event' },
+    harness.database,
+    harness.journalCreator,
+  );
 
   const journal = harness.journals.get(`COD_REVENUE:${buildCodRevenueReferenceId(ORDER_ID, SHOP_ID)}`);
   assert.equal(harness.writes, 1);
@@ -116,8 +135,7 @@ test('COD order revenue is posted once with the actual shop amount and currency'
     journal?.lines.map((line) => [line.account.code, line.direction, line.amount.toString(), line.currency, line.shopId]),
     [
       ['1200', 'DEBIT', '125.5', CURRENCY, SHOP_ID],
-      ['4000', 'CREDIT', '100', CURRENCY, SHOP_ID],
-      ['2000', 'CREDIT', '25.5', CURRENCY, SHOP_ID],
+      ['4000', 'CREDIT', '125.5', CURRENCY, SHOP_ID],
     ],
   );
   assert.deepEqual(
@@ -128,7 +146,7 @@ test('COD order revenue is posted once with the actual shop amount and currency'
       currency: CURRENCY,
       shippingTotal: SHIPPING_TOTAL,
     }).map((line) => [line.accountCode, line.amount]),
-    [['1200', AMOUNT], ['4000', AMOUNT - SHIPPING_TOTAL], ['2000', SHIPPING_TOTAL]],
+    [['1200', AMOUNT], ['4000', AMOUNT]],
   );
 });
 
@@ -139,6 +157,8 @@ test('shipment.delivered posts COD clearing against the receivable once, not rev
     recordCodDeliveryCollectionJournal(deliveryInput, harness.database, harness.journalCreator),
     /revenue journal missing or inconsistent/,
   );
+  assert.equal(harness.writes, 0);
+  assert.equal(harness.journals.has(`COD_REVENUE:${buildCodRevenueReferenceId(ORDER_ID, SHOP_ID)}`), false);
   await recordCodOrderRevenue(revenueInput, harness.database, harness.journalCreator);
   await recordCodDeliveryCollectionJournal(deliveryInput, harness.database, harness.journalCreator);
   await recordCodDeliveryCollectionJournal(
@@ -151,9 +171,24 @@ test('shipment.delivered posts COD clearing against the receivable once, not rev
     `COD_DELIVERY_COLLECTION:${buildCodDeliveryCollectionReferenceId(ORDER_ID, SHOP_ID)}`,
   );
   assert.equal(harness.writes, 2);
+  assert.equal([...harness.journals.keys()].filter((key) => key.startsWith('COD_REVENUE:')).length, 1);
+  assert.equal([...harness.journals.keys()].filter((key) => key.startsWith('COD_DELIVERY_COLLECTION:')).length, 1);
+  const revenue = harness.journals.get(`COD_REVENUE:${buildCodRevenueReferenceId(ORDER_ID, SHOP_ID)}`);
+  assert.deepEqual(
+    revenue?.lines.map((line) => [line.account.code, line.direction, line.amount.toString()]),
+    [['1200', 'DEBIT', '125.5'], ['4000', 'CREDIT', '125.5']],
+  );
+  assert.equal(
+    revenue?.lines.reduce((debits, line) => debits + (line.direction === 'DEBIT' ? amountCents(line.amount) : 0), 0),
+    revenue?.lines.reduce((credits, line) => credits + (line.direction === 'CREDIT' ? amountCents(line.amount) : 0), 0),
+  );
   assert.deepEqual(
     journal?.lines.map((line) => [line.account.code, line.direction, line.amount.toString(), line.currency, line.shopId]),
     [['1210', 'DEBIT', '125.5', CURRENCY, SHOP_ID], ['1200', 'CREDIT', '125.5', CURRENCY, SHOP_ID]],
+  );
+  assert.equal(
+    journal?.lines.reduce((debits, line) => debits + (line.direction === 'DEBIT' ? amountCents(line.amount) : 0), 0),
+    journal?.lines.reduce((credits, line) => credits + (line.direction === 'CREDIT' ? amountCents(line.amount) : 0), 0),
   );
   assert.deepEqual(
     buildCodDeliveryCollectionJournalLines({
@@ -166,7 +201,64 @@ test('shipment.delivered posts COD clearing against the receivable once, not rev
   );
 });
 
-test('payment.collected posts a bank receipt only after delivery collection and is idempotent', async () => {
+test('delivery collection uses an explicit partial amount and preserves delivery metadata', async () => {
+  const harness = createHarness();
+
+  await recordCodOrderRevenue(revenueInput, harness.database, harness.journalCreator);
+  await recordCodDeliveryCollectionJournal({
+    ...deliveryInput,
+    amount: 10,
+    deliveryProviderId: 'provider-1',
+    deliveryId: 'delivery-1',
+    deliveryNumber: 'DLV-1',
+    waybill: 'WB-1',
+    eventReference: 'delivery-event-1',
+  }, harness.database, harness.journalCreator);
+
+  const journal = harness.journalInputs.find((entry) => entry.referenceType === 'COD_DELIVERY_COLLECTION');
+  assert.deepEqual(
+    journal?.lines.map((line) => [line.accountCode, line.direction, line.amount, line.shopId]),
+    [['1210', 'DEBIT', 10, SHOP_ID], ['1200', 'CREDIT', 10, SHOP_ID]],
+  );
+  assert.match(journal?.narration ?? '', /Delivered — COD in Transit \(Assumed Collection\)/);
+  assert.match(journal?.narration ?? '', /courier cash receipt not independently verified/);
+  assert.match(journal?.narration ?? '', /payment=payment-1/);
+  assert.match(journal?.narration ?? '', /deliveryProvider=provider-1/);
+  assert.match(journal?.narration ?? '', /delivery=delivery-1/);
+  assert.match(journal?.narration ?? '', /waybill=WB-1/);
+  assert.match(journal?.narration ?? '', /event=delivery-event-1/);
+});
+
+test('delivery collection rejects invalid amounts and missing attribution', async () => {
+  const harness = createHarness();
+  await recordCodOrderRevenue(revenueInput, harness.database, harness.journalCreator);
+
+  for (const amount of [0, -1, AMOUNT + 1, Number.NaN]) {
+    await assert.rejects(
+      recordCodDeliveryCollectionJournal({ ...deliveryInput, amount }, harness.database, harness.journalCreator),
+      /invalid payable amount/,
+    );
+  }
+  await assert.rejects(
+    recordCodDeliveryCollectionJournal({ ...deliveryInput, shopId: 'unknown-shop' }, harness.database, harness.journalCreator),
+    /Order sales projection missing/,
+  );
+  await assert.rejects(
+    recordCodDeliveryCollectionJournal(deliveryInput, createHarness('COD', { projectionExists: false }).database, harness.journalCreator),
+    /Order sales projection missing/,
+  );
+  await assert.rejects(
+    recordCodDeliveryCollectionJournal(
+      deliveryInput,
+      createHarness('COD', { paymentId: null }).database,
+      harness.journalCreator,
+    ),
+    /no payment or currency attribution/,
+  );
+  assert.equal(harness.writes, 1);
+});
+
+test('successful payment.collected posts an idempotent Stage 3 journal after delivery collection', async () => {
   const harness = createHarness();
 
   await assert.rejects(
@@ -186,6 +278,12 @@ test('payment.collected posts a bank receipt only after delivery collection and 
     journal?.lines.map((line) => [line.account.code, line.direction, line.amount.toString(), line.currency, line.shopId]),
     [['1010', 'DEBIT', '125.5', CURRENCY, SHOP_ID], ['1210', 'CREDIT', '125.5', CURRENCY, SHOP_ID]],
   );
+  const journalInput = harness.journalInputs.find((entry) => entry.referenceType === 'COD_BANK_RECEIPT');
+  assert.equal(journalInput?.entryDate?.toString(), bankAllocation.collectedAt.toString());
+  assert.match(journalInput?.narration ?? '', /order order-1, shop shop-1/);
+  assert.match(journalInput?.narration ?? '', /collection_ref=payment-collected-event/);
+  assert.match(journalInput?.narration ?? '', /collected_at=2026-10-17T02:00:00.000Z/);
+  assert.match(journalInput?.narration ?? '', /checkout_ref=checkout-1/);
   assert.deepEqual(
     buildCodBankReceiptJournalLines(bankAllocation).map((line) => line.accountCode),
     ['1010', '1210'],
