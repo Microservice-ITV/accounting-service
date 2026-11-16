@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import {
+  buildCodDeliveryCollectionEvent,
   buildDeliveryInvoiceExpenseReference,
   buildDeliveryExpenseReference,
   buildShipmentDeliveredExpense,
@@ -23,6 +24,7 @@ const makeEvent = (
   deliveredAt = '2026-10-07T01:00:00.000Z',
   customerShippingFee?: number,
   deliveryCompanyId = DELIVERY_COMPANY_ID,
+  codCollectedAmount?: number,
 ) => normalizeShipmentDeliveredEvent({
   event_id: `delivered-event-${deliveryId}`,
   event: 'shipment.delivered',
@@ -34,6 +36,8 @@ const makeEvent = (
     deliveryCompanyId,
     shopId: shopIds.length === 1 ? shopIds[0] : undefined,
     ...(customerShippingFee === undefined ? {} : { shipping_fee: customerShippingFee }),
+    ...(codCollectedAmount === undefined ? {} : { codCollectedAmount }),
+    wayBillNo: `WB-${deliveryId}`,
     delivery: {
       deliveryId,
       deliveryNumber: `DLV-${deliveryId}`,
@@ -213,6 +217,42 @@ test('builds a delivery expense from the canonical company and shop identities',
   assert.equal(expense.shopId, SHOP_ID);
   assert.equal(expense.deliveryCompanyId, DELIVERY_COMPANY_ID);
   assert.equal(expense.expenseDate.toISOString(), '2026-10-07T01:00:00.000Z');
+});
+
+test('builds COD collection input with explicit partial amount and available trace metadata', () => {
+  const event = makeEvent([SHOP_ID], 'delivery-7', 'order-7', undefined, undefined, DELIVERY_COMPANY_ID, 32.5);
+  const collection = buildCodDeliveryCollectionEvent(event);
+
+  assert.deepEqual(collection, {
+    orderId: 'order-7',
+    shopId: SHOP_ID,
+    eventId: 'delivered-event-delivery-7',
+    eventReference: 'delivered-event-delivery-7',
+    entryDate: new Date('2026-10-07T01:00:00.000Z'),
+    deliveryProviderId: DELIVERY_COMPANY_ID,
+    deliveryId: 'delivery-7',
+    deliveryNumber: 'DLV-delivery-7',
+    waybill: 'WB-delivery-7',
+    amount: 32.5,
+  });
+});
+
+test('does not invent a delivery collection amount and rejects invalid or conflicting explicit amounts', () => {
+  const missingAmount = buildCodDeliveryCollectionEvent(makeEvent());
+  assert.equal('amount' in missingAmount, false);
+
+  assert.throws(() => normalizeShipmentDeliveredEvent({
+    ...makeEvent(),
+    data: { ...makeEvent().data, codCollectedAmount: 0 },
+  }));
+  const conflictingAmounts = makeEvent([SHOP_ID], 'delivery-conflict');
+  conflictingAmounts.data.cod_collected_amount = 10;
+  conflictingAmounts.data.codCollectedAmount = 20;
+  assert.throws(
+    () => buildCodDeliveryCollectionEvent(conflictingAmounts),
+    (error: unknown) => error instanceof PermanentShipmentDeliveredEventError
+      && /conflicting COD collection amounts/.test(error.message),
+  );
 });
 
 test('finds the fee by both shop and Delivery Company identity', async () => {

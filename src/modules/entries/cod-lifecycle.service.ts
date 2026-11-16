@@ -12,11 +12,11 @@ type CodJournalContext = {
 
 type CodCollectionAllocation = CodJournalContext & {
   paymentId: string;
+  collectedAt: Date;
+  checkoutReference?: string;
 };
 
 export function buildCodRevenueRecognitionJournalLines(context: CodJournalContext) {
-  const shippingTotal = context.shippingTotal ?? 0;
-  const revenueAmount = context.amount - shippingTotal;
   return [
     {
       accountCode: '1200',
@@ -26,22 +26,14 @@ export function buildCodRevenueRecognitionJournalLines(context: CodJournalContex
       shopId: context.shopId,
       memo: `COD receivable (${context.currency}; order=${context.orderId}, shop=${context.shopId})`,
     },
-    ...(revenueAmount > 0 ? [{
+    {
       accountCode: '4000',
       direction: 'CREDIT' as const,
-      amount: revenueAmount,
+      amount: context.amount,
       currency: context.currency,
       shopId: context.shopId,
       memo: `COD sales revenue recognized on order confirmation (${context.currency}; order=${context.orderId}, shop=${context.shopId})`,
-    }] : []),
-    ...(shippingTotal > 0 ? [{
-      accountCode: '2000',
-      direction: 'CREDIT' as const,
-      amount: shippingTotal,
-      currency: context.currency,
-      shopId: context.shopId,
-      memo: `Delivery fee payable (${context.currency}; order=${context.orderId}, shop=${context.shopId})`,
-    }] : []),
+    },
   ];
 }
 
@@ -53,7 +45,7 @@ export function buildCodDeliveryCollectionJournalLines(context: CodJournalContex
       amount: context.amount,
       currency: context.currency,
       shopId: context.shopId,
-      memo: `COD collected on delivery (${context.currency}; order=${context.orderId}, shop=${context.shopId})`,
+      memo: `COD in transit (assumed collection; courier cash receipt not independently verified) (${context.currency}; order=${context.orderId}, shop=${context.shopId})`,
     },
     {
       accountCode: '1200',
@@ -61,7 +53,7 @@ export function buildCodDeliveryCollectionJournalLines(context: CodJournalContex
       amount: context.amount,
       currency: context.currency,
       shopId: context.shopId,
-      memo: `COD receivable cleared on delivery (${context.currency}; order=${context.orderId}, shop=${context.shopId})`,
+      memo: `COD receivable transferred to in-transit funds on delivery (${context.currency}; order=${context.orderId}, shop=${context.shopId})`,
     },
   ];
 }
@@ -192,7 +184,6 @@ export async function recordCodOrderRevenue(
         ...input,
         amount,
         currency: projection.currency,
-        shippingTotal,
       }),
     }, tx);
   });
@@ -304,7 +295,18 @@ async function findLegacyCollection(
 }
 
 export async function recordCodDeliveryCollectionJournal(
-  input: { orderId: string; shopId: string; eventId: string; entryDate: Date },
+  input: {
+    orderId: string;
+    shopId: string;
+    eventId: string;
+    entryDate: Date;
+    amount?: number;
+    deliveryProviderId?: string;
+    deliveryId?: string;
+    deliveryNumber?: string;
+    waybill?: string;
+    eventReference?: string;
+  },
   database: TransactionDatabase = prisma,
   journalCreator: JournalCreator = createJournalEntryInTransaction,
 ): Promise<void> {
@@ -323,12 +325,16 @@ export async function recordCodDeliveryCollectionJournal(
       throw new Error(`COD order ${input.orderId}, shop ${input.shopId} has no payment or currency attribution`);
     }
 
-    const amount = Number(projection.paidAmount.toString());
+    const projectedAmount = Number(projection.paidAmount.toString());
+    const amount = input.amount ?? projectedAmount;
     const shippingTotal = Number(projection.shippingTotal.toString());
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!Number.isFinite(projectedAmount) || projectedAmount <= 0) {
+      throw new Error(`COD order ${input.orderId}, shop ${input.shopId} has an invalid projected payable amount`);
+    }
+    if (!Number.isFinite(amount) || amount <= 0 || amount > projectedAmount) {
       throw new Error(`COD order ${input.orderId}, shop ${input.shopId} has an invalid payable amount`);
     }
-    if (!Number.isFinite(shippingTotal) || shippingTotal < 0 || shippingTotal > amount) {
+    if (!Number.isFinite(shippingTotal) || shippingTotal < 0 || shippingTotal > projectedAmount) {
       throw new Error(`COD order ${input.orderId}, shop ${input.shopId} has an invalid shipping amount`);
     }
 
@@ -350,7 +356,7 @@ export async function recordCodDeliveryCollectionJournal(
     });
     if (!revenue || !isMatchingCodRevenueJournal(
       revenue,
-      amount,
+      projectedAmount,
       shippingTotal,
       projection.currency,
       input.shopId,
@@ -384,11 +390,21 @@ export async function recordCodDeliveryCollectionJournal(
     );
     if (legacyCollection) return;
 
+    const metadata = [
+      `order=${input.orderId}`,
+      `shop=${input.shopId}`,
+      `payment=${projection.paymentId}`,
+      ...(input.deliveryProviderId ? [`deliveryProvider=${input.deliveryProviderId}`] : []),
+      ...(input.deliveryId ? [`delivery=${input.deliveryId}`] : []),
+      ...(input.deliveryNumber ? [`deliveryNumber=${input.deliveryNumber}`] : []),
+      ...(input.waybill ? [`waybill=${input.waybill}`] : []),
+      ...(input.eventReference ? [`event=${input.eventReference}`] : []),
+    ].join(', ');
     await journalCreator({
       referenceType: 'COD_DELIVERY_COLLECTION',
       referenceId,
-      eventId: `shipment.delivered:cod-collection:${input.orderId}:${input.shopId}`,
-      narration: `COD collected on delivery for order ${input.orderId}, shop ${input.shopId}`,
+      eventId: `shipment.delivered:cod-collection:${input.orderId}:${input.shopId}:${input.eventReference ?? input.eventId}`,
+      narration: `Delivered — COD in Transit (Assumed Collection); courier cash receipt not independently verified (${metadata})`,
       entryDate: input.entryDate,
       lines: buildCodDeliveryCollectionJournalLines({
         orderId: input.orderId,
@@ -411,6 +427,9 @@ export async function recordCodBankReceiptJournals(
     for (const allocation of allocations) {
       if (!Number.isFinite(allocation.amount) || allocation.amount <= 0) {
         throw new Error('COD bank receipt amount must be greater than zero');
+      }
+      if (!eventId.trim() || Number.isNaN(allocation.collectedAt.getTime())) {
+        throw new Error('COD bank receipt requires a collection reference and valid collection timestamp');
       }
       await tx.$executeRaw`
         SELECT pg_advisory_xact_lock(
@@ -514,7 +533,14 @@ export async function recordCodBankReceiptJournals(
         referenceType: 'COD_BANK_RECEIPT',
         referenceId,
         eventId: `payment.collected:cod-bank-receipt:${allocation.paymentId}:${allocation.shopId}`,
-        narration: `COD bank receipt for order ${allocation.orderId}, shop ${allocation.shopId}`,
+        narration: [
+          `COD remittance for order ${allocation.orderId}, shop ${allocation.shopId}`,
+          `payment=${allocation.paymentId}`,
+          `collection_ref=${eventId}`,
+          `collected_at=${allocation.collectedAt.toISOString()}`,
+          ...(allocation.checkoutReference ? [`checkout_ref=${allocation.checkoutReference}`] : []),
+        ].join('; '),
+        entryDate: allocation.collectedAt,
         lines: buildCodBankReceiptJournalLines(allocation),
       }, tx);
     }

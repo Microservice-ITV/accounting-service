@@ -17,6 +17,8 @@ const shipmentDeliveredSchema = z.object({
     order_id: z.string().min(1),
     deliveryCompanyId: z.string().min(1),
     shopId: z.string().min(1).nullish(),
+    codCollectedAmount: z.number().finite().positive().optional(),
+    cod_collected_amount: z.number().finite().positive().optional(),
     delivery: z.object({
       deliveryId: z.string().min(1),
       deliveryNumber: z.string().min(1),
@@ -107,6 +109,44 @@ export function buildShipmentDeliveredExpense(event: ShipmentDeliveredEvent): De
     shopId,
     expenseDate: deliveredAt,
     description,
+  };
+}
+
+function firstNonEmptyText(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
+}
+
+export function buildCodDeliveryCollectionEvent(event: ShipmentDeliveredEvent) {
+  const deliveryInput = buildShipmentDeliveredExpense(event);
+  const camelAmount = event.data.codCollectedAmount;
+  const snakeAmount = event.data.cod_collected_amount;
+  if (camelAmount !== undefined && snakeAmount !== undefined && camelAmount !== snakeAmount) {
+    throw new PermanentShipmentDeliveredEventError(
+      `shipment.delivered for delivery ${deliveryInput.deliveryId} contains conflicting COD collection amounts`,
+    );
+  }
+
+  const amount = camelAmount ?? snakeAmount;
+  const waybill = firstNonEmptyText(
+    event.data.delivery.wayBillNo,
+    event.data.delivery.waybillNo,
+    event.data.delivery.waybill,
+    event.data.wayBillNo,
+    event.data.waybillNo,
+    event.data.waybill,
+  );
+
+  return {
+    orderId: deliveryInput.orderId,
+    shopId: deliveryInput.shopId,
+    eventId: event.event_id,
+    eventReference: event.event_id,
+    entryDate: deliveryInput.expenseDate,
+    deliveryProviderId: deliveryInput.deliveryCompanyId,
+    deliveryId: deliveryInput.deliveryId,
+    deliveryNumber: deliveryInput.deliveryNumber,
+    ...(waybill ? { waybill } : {}),
+    ...(amount !== undefined ? { amount } : {}),
   };
 }
 
@@ -460,13 +500,8 @@ const consumeMessages = async (activeChannel: Channel): Promise<void> => {
       try {
         const raw: unknown = JSON.parse(message.content.toString('utf8'));
         const event = normalizeShipmentDeliveredEvent(raw);
-        const deliveredOrder = buildShipmentDeliveredExpense(event);
-        await recordCodDeliveryCollectionJournal({
-          orderId: deliveredOrder.orderId,
-          shopId: deliveredOrder.shopId,
-          eventId: event.event_id,
-          entryDate: deliveredOrder.expenseDate,
-        });
+        const codDeliveryEvent = buildCodDeliveryCollectionEvent(event);
+        await recordCodDeliveryCollectionJournal(codDeliveryEvent);
         await recordShipmentDeliveredExpenses(event);
         activeChannel.ack(message);
       } catch (error) {
